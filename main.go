@@ -21,7 +21,9 @@ THE SOFTWARE.
 */
 package main
 
-import "websocket-client/cmd"
+import (
+	"github.com/alejoacosta74/kraken-api/cmd"
+)
 
 func main() {
 	cmd.Execute()

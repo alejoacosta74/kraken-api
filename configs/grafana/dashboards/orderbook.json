@@ -1,0 +1,29 @@
+{
+  "title": "Order Book Metrics",
+  "panels": [
+    {
+      "title": "Message Counts",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "rate(orderbook_snapshots_received_total[1m])",
+          "legendFormat": "Snapshots/min"
+        },
+        {
+          "expr": "rate(orderbook_updates_received_total[1m])",
+          "legendFormat": "Updates/min"
+        }
+      ]
+    },
+    {
+      "title": "Processing Latency",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "rate(orderbook_process_latency_seconds_sum[1m]) / rate(orderbook_process_latency_seconds_count[1m])",
+          "legendFormat": "Avg Latency"
+        }
+      ]
+    }
+  ]
+} 

@@ -1,0 +1,32 @@
+groups:
+  - name: orderbook_alerts
+    rules:
+      # Alert on high message latency
+      - alert: HighMessageLatency
+        expr: rate(orderbook_process_latency_seconds_sum[5m]) / rate(orderbook_process_latency_seconds_count[5m]) > 0.1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High message processing latency"
+          description: "Message processing latency is above 100ms"
+
+      # Alert on Kafka errors
+      - alert: KafkaErrors
+        expr: rate(kafka_send_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka send errors detected"
+          description: "Messages are failing to send to Kafka"
+
+      # Alert on WebSocket disconnections
+      - alert: WebSocketDisconnections
+        expr: rate(websocket_connection_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebSocket connection errors detected"
+          description: "WebSocket client is experiencing connection issues" 
