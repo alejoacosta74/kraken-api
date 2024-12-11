@@ -54,7 +54,6 @@ func (c *WebSocketClient) readMessages(ctx context.Context, readerDone chan<- st
 					c.logger.Debugf("Timeout error, continuing. Error: %v", err)
 					continue
 				}
-				c.onError(err)
 				readerErrors <- err
 				return
 			}
@@ -93,18 +92,9 @@ func (c *WebSocketClient) readNextMessage() ([]byte, error) {
 		return nil, fmt.Errorf("connection is nil")
 	}
 
-	messageType, message, err := c.conn.ReadMessage()
+	_, message, err := c.conn.ReadMessage()
 	if err != nil {
 		return nil, err
-	}
-
-	switch messageType {
-	case websocket.TextMessage:
-		c.onMessageHandler(message)
-	case websocket.PingMessage:
-		if err := c.conn.WriteMessage(websocket.PongMessage, nil); err != nil {
-			return nil, fmt.Errorf("error sending pong: %w", err)
-		}
 	}
 
 	return message, nil

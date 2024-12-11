@@ -7,6 +7,15 @@ import (
 	"websocket-client/kraken"
 )
 
+// MessageType represents different types of websocket messages
+type MessageType string
+
+const (
+	TypeBookUnsubscribeAck    MessageType = "unsubscribe_ack"
+	TypeBookUnsubscribeResult MessageType = "unsubscribe_result"
+	// ... other types
+)
+
 // routeResponseMessage processes incoming WebSocket messages and routes them to appropriate handlers
 // based on their type and content.
 //
@@ -38,9 +47,31 @@ import (
 //   - Subscription response parsing errors
 //   - Errors from specialized handlers
 func (c *WebSocketClient) routeResponseMessage(message []byte) error {
+	var generic struct {
+		Type MessageType `json:"type"`
+	}
+	if err := json.Unmarshal(message, &generic); err != nil {
+		c.logger.Errorf("failed to parse message type: %w", err)
+		return fmt.Errorf("failed to parse message type: %w", err)
+	}
+	c.logger.Tracef("Received message type: %s", generic.Type)
 
+	// Check for waiters of this message type
+	c.waitersMutex.RLock()
+	for id, waiter := range c.responseWaiters {
+		c.logger.Tracef("Checking waiter %s for message type %s", id, generic.Type)
+		if waiter.matcher(message) {
+			if err := waiter.handler(message); err == nil {
+				close(waiter.done)
+				c.waitersMutex.RUnlock()
+				return nil
+			}
+		}
+	}
+	c.waitersMutex.RUnlock()
+
+	// If not handled by a waiter, proceed with normal routing
 	var genericMsg kraken.GenericResponse
-
 	if err := json.Unmarshal(message, &genericMsg); err != nil {
 		return fmt.Errorf("failed to parse message: %w", err)
 	}
@@ -63,30 +94,25 @@ func (c *WebSocketClient) routeResponseMessage(message []byte) error {
 		c.logger.Infof("Subscription acknowledged for %s", resp.Result.Symbol)
 		return nil
 
+		// we received a book snapshot
 	case genericMsg.Channel == "book" && genericMsg.Type == "snapshot":
 		return c.handleBookSnapshot(message)
 
-	case genericMsg.Channel == "book":
+		// we received a book update
+	case genericMsg.Channel == "book" && genericMsg.Type == "update":
 		return c.handleBookUpdate(message)
+
+	case genericMsg.Channel == "status":
+		return c.handleStatusUpdate(message)
+
+	case genericMsg.Channel == "heartbeat":
+		return c.handleHeartbeat(message)
+
+	case genericMsg.Channel == "ping":
+		return c.handlePing(message)
 
 	default:
 		c.logger.Debugf("Unhandled message type: %s", string(message))
 		return nil
 	}
-}
-
-func (c *WebSocketClient) handleBookSnapshot(message []byte) error {
-	var snapshot kraken.BookSnapshot
-	if err := json.Unmarshal(message, &snapshot); err != nil {
-		return fmt.Errorf("failed to parse book snapshot: %w", err)
-	}
-
-	c.logger.Infof("Received book snapshot for %s", snapshot.Data[0].Symbol)
-	c.bookSnapshots <- snapshot
-	return nil
-}
-
-func (c *WebSocketClient) handleBookUpdate(message []byte) error {
-	// Handle book updates if needed
-	return nil
 }

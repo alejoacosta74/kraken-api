@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"websocket-client/client"
+	"websocket-client/kraken"
 
 	"github.com/alejoacosta74/go-logger"
 	"github.com/spf13/cobra"
@@ -35,14 +36,66 @@ func runStart(cmd *cobra.Command, args []string) {
 	wsUrl := args[0]
 	pair := viper.GetString("tradingpair")
 
-	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := &sync.WaitGroup{}
 
-	// Capture system signals for graceful shutdown
+	// handle interrupt signals to cancel the context and shutdown the client
 	go handleSignals(cancel)
 
+	wg := &sync.WaitGroup{}
+
+	// Buffered channels to prevent blocking during shutdown
+	snapshotChan := make(chan client.Event, 100)
+	updateChan := make(chan client.Event, 100)
+
 	wsClient := client.NewWebSocketClient(wsUrl, client.WithTradingPair(pair))
+
+	// Create a done channel for coordinating shutdown
+	done := make(chan struct{})
+
+	wsClient.Subscribe(client.EventBookSnapshot, func(e client.Event) {
+		select {
+		case <-done:
+			logger.Debug("Done channel received, not sending BookSnapshot event")
+			return
+		default:
+			snapshotChan <- e
+		}
+	})
+
+	wsClient.Subscribe(client.EventBookUpdate, func(e client.Event) {
+		select {
+		case <-done:
+			logger.Debug("Done channel received, not sending BookUpdate event")
+			return
+		default:
+			updateChan <- e
+		}
+	})
+
+	// Handle events
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(done)         // Signal event handlers to stop
+		defer close(snapshotChan) // Safe to close since handlers will stop
+		defer close(updateChan)   // Safe to close since handlers will stop
+
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Debug("Context cancelled, exiting event handler")
+				return
+			case event := <-snapshotChan:
+				if snapshot, ok := event.Data.(kraken.BookSnapshot); ok {
+					fmt.Println("Snapshot received:", snapshot.PrettyPrint())
+				}
+			case event := <-updateChan:
+				if update, ok := event.Data.(kraken.SnapshotUpdate); ok {
+					fmt.Println("Update received:", update.Data[0].Symbol)
+				}
+			}
+		}
+	}()
 
 	wg.Add(1)
 	go func() {
@@ -50,20 +103,6 @@ func runStart(cmd *cobra.Command, args []string) {
 		wsClient.Run(ctx)
 	}()
 
-	// Wait for and process the book snapshot
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		snapshot, err := wsClient.GetBookSnapshot(ctx)
-		if err != nil {
-			logger.Errorf("Failed to get book snapshot: %v", err)
-			cancel() // Cancel context on error
-			return
-		}
-
-		fmt.Println(snapshot.PrettyPrint())
-	}()
-
 	wg.Wait()
-	logger.Info("Client shutdown")
+	logger.Info("Client shutdown complete")
 }

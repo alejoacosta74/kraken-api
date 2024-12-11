@@ -15,10 +15,10 @@ type BookRequest struct {
 
 // BookParams represents the parameters for a book subscription
 type BookParams struct {
-	Channel  string   `json:"channel"`         // Always "book"
-	Symbol   []string `json:"symbol"`          // List of currency pairs
-	Depth    int      `json:"depth,omitempty"` // Optional: 10, 25, 100, 500, 1000 (default: 10)
-	Snapshot bool     `json:"snapshot"`        // Default: true
+	Channel  string   `json:"channel"`            // Always "book"
+	Symbol   []string `json:"symbol"`             // List of currency pairs
+	Depth    int      `json:"depth,omitempty"`    // Optional: 10, 25, 100, 500, 1000 (default: 10)
+	Snapshot bool     `json:"snapshot,omitempty"` // Default: true
 }
 
 // BookResponse represents the subscription acknowledgment
@@ -48,10 +48,11 @@ type BookSnapshot struct {
 }
 
 type BookData struct {
-	Symbol   string      `json:"symbol"`
-	Bids     []BookLevel `json:"bids"`
-	Asks     []BookLevel `json:"asks"`
-	Checksum int         `json:"checksum"`
+	Symbol    string      `json:"symbol"`
+	Bids      []BookLevel `json:"bids"`
+	Asks      []BookLevel `json:"asks"`
+	Checksum  int         `json:"checksum"`
+	Timestamp string      `json:"timestamp,omitempty"`
 }
 
 type BookLevel struct {
@@ -70,7 +71,7 @@ func (b *BookSnapshot) PrettyPrint() string {
 
 	// Print header
 	fmt.Fprintf(w, "\n🏦 Order Book for %s (Checksum: %d)\n", book.Symbol, book.Checksum)
-	fmt.Fprintf(w, "\n%s\t|\t%s\n", "BIDS", "ASKS")
+	fmt.Fprintf(w, "\n%s\t\t|\t%s\n", "BIDS", "ASKS")
 	fmt.Fprintf(w, "%s\t|\t%s\n", "Price\tQuantity", "Price\tQuantity")
 	fmt.Fprintf(w, "%s\t|\t%s\n", "-----\t--------", "-----\t--------")
 
@@ -103,4 +104,30 @@ func (b *BookSnapshot) PrettyPrint() string {
 
 	w.Flush()
 	return buf.String()
+}
+
+type SnapshotUpdate struct {
+	Channel string     `json:"channel"`
+	Type    string     `json:"type"`
+	Data    []BookData `json:"data"`
+}
+
+type BookUnsubscribe struct {
+	Method string     `json:"method"` // Always "unsubscribe"
+	Params BookParams `json:"params"` // Always { channel: "book", symbol: [pair] }
+}
+
+type BookUnsubscribeAck struct {
+	Method  string                `json:"method"`  // Always "unsubscribe"
+	Result  BookUnsubscribeResult `json:"result"`  // Always { channel: "book", snapshot: true, symbol: "pair"}
+	Success bool                  `json:"success"` // True or false
+	TimeIn  string                `json:"time_in"`
+	TimeOut string                `json:"time_out"`
+}
+
+type BookUnsubscribeResult struct {
+	Channel  string `json:"channel"` // Always "book"
+	Depth    int    `json:"depth"`
+	Snapshot bool   `json:"snapshot"` // Always true
+	Symbol   string `json:"symbol"`
 }

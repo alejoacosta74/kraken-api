@@ -6,6 +6,7 @@ replace github.com/alejoacosta74/go-logger => ../mylogger2
 
 require (
 	github.com/alejoacosta74/go-logger v0.0.0-00010101000000-000000000000
+	github.com/google/uuid v1.4.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0

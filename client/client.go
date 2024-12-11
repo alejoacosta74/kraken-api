@@ -14,20 +14,21 @@ import (
 )
 
 type WebSocketClient struct {
-	url  string
-	conn *websocket.Conn
-
-	subscriptions []string
-
-	logger *logger.Logger
-
-	connMutex     sync.Mutex
-	bookSnapshots chan kraken.BookSnapshot // Channel for book snapshots
-	tradingPair   string
-
-	readyChan   chan struct{} // signals when client is ready to receive subscriptions
-	doneChan    chan struct{} // signals when client has stopped
-	initErrChan chan error    // signals initialization errors
+	url             string
+	conn            *websocket.Conn
+	subscriptions   []string
+	logger          *logger.Logger
+	connMutex       sync.Mutex
+	tradingPair     string
+	readyChan       chan struct{}                // channel to signal that the client is ready
+	doneChan        chan struct{}                // channel to signal that the client is done
+	initErrChan     chan error                   // channel to signal that the client has an error
+	eventHandlers   map[EventType][]EventHandler // map of event types to event handlers
+	eventsMutex     sync.RWMutex
+	shutdownOnce    sync.Once
+	shutdown        chan struct{}
+	responseWaiters map[string]*responseWaiter // map of waiter unique ID to waiter
+	waitersMutex    sync.RWMutex
 }
 
 type Option func(*WebSocketClient)
@@ -40,13 +41,15 @@ func WithTradingPair(pair string) Option {
 
 func NewWebSocketClient(url string, opts ...Option) *WebSocketClient {
 	c := WebSocketClient{
-		url:           url,
-		subscriptions: []string{},
-		logger:        logger.Log,
-		bookSnapshots: make(chan kraken.BookSnapshot),
-		readyChan:     make(chan struct{}),
-		doneChan:      make(chan struct{}),
-		initErrChan:   make(chan error, 1), // buffered channel to avoid blocking
+		url:             url,
+		subscriptions:   []string{},
+		logger:          logger.Log,
+		readyChan:       make(chan struct{}),
+		doneChan:        make(chan struct{}),
+		initErrChan:     make(chan error, 1), // buffered channel to avoid blocking
+		eventHandlers:   make(map[EventType][]EventHandler),
+		shutdown:        make(chan struct{}),
+		responseWaiters: make(map[string]*responseWaiter),
 	}
 
 	for _, opt := range opts {
@@ -69,31 +72,13 @@ func (c *WebSocketClient) Run(ctx context.Context) {
 		return
 	}
 
-	// defer c.cleanUp()
-
 	// Wait for system status message before allowing subscriptions
 	if err := c.waitForSystemStatus(ctx); err != nil {
 		c.initErrChan <- err
 		return
 	}
 
-	// c.onConnection()
-
 	close(c.readyChan) // <-- Signals that the client is ready
-
-	// add subscription manually for now
-	// subscription := "{ \"event\":\"subscribe\", \"subscription\":{\"name\":\"trade\"},\"pair\":[\"ETH/USD\"] }"
-
-	// c.subscriptions = append(c.subscriptions, subscription)
-	// c.logger.Infof("Subscribed to %s", subscription)
-
-	// Send subscriptions
-	for _, subscription := range c.subscriptions {
-		err := c.Subscribe(subscription)
-		if err != nil {
-			c.logger.Error("Error subscribing to " + subscription + ": " + err.Error())
-		}
-	}
 
 	// Subscribe to book channel if trading pair is set
 	if c.tradingPair != "" {
@@ -102,7 +87,6 @@ func (c *WebSocketClient) Run(ctx context.Context) {
 			return
 		}
 	}
-	// subscribe to a book channel if trading pair is set
 
 	// channel to stop the readMessages goroutine
 	readerDone := make(chan struct{})
@@ -119,47 +103,64 @@ func (c *WebSocketClient) Run(ctx context.Context) {
 		c.logger.Error("Reader error: " + err.Error())
 	}
 
-	// use a mutex to protect access to the websocket connection while it is being closed
-	c.connMutex.Lock()
+	// clean up the connection
 	if c.conn != nil {
 		c.cleanUp()
 	}
-	c.connMutex.Unlock()
 
 	// wait for the reader to finish
 	<-readerDone
+	c.logger.Debug("Reader finished, exiting client Run goroutine")
 }
 
 // cleanup closes the WebSocket connection
 func (c *WebSocketClient) cleanUp() {
-	if c.conn != nil {
-		c.logger.Warnf("Closing connection to websocket at %s", c.url)
-		// Send a close frame to the server to initiate a clean websocket shutdown
-		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		c.conn.Close()
-	}
+	c.shutdownOnce.Do(func() {
+		c.logger.Debug("Starting cleanup...")
+		close(c.shutdown) // Signal handlers to stop
+		c.logger.Trace("shutdown channel closed")
+		if c.conn != nil {
+			c.logger.Debug("Unsubscribing from book channel")
+			// First try to unsubscribe gracefully
+			if err := c.unsubscribeFromBook(context.Background()); err != nil {
+				c.logger.Errorf("Failed to unsubscribe from book: %v", err)
+			}
+
+			c.logger.Warnf("Closing connection to websocket at %s", c.url)
+			// Send a close frame to the server
+			c.connMutex.Lock()
+			defer c.connMutex.Unlock()
+			c.conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			c.conn.Close()
+			c.logger.Debug("Connection closed")
+		}
+		c.logger.Debug("Cleanup complete")
+	})
 }
 
-// GetBookSnapshot retrieves the next available order book snapshot from the snapshot channel.
-//
-// Parameters:
-//   - ctx: Context for cancellation control
-//
-// Returns:
-//   - *kraken.BookSnapshot: Pointer to the received order book snapshot
-//   - error: Context error if the context is cancelled before receiving a snapshot
-//
-// The function will block until either:
-//  1. A snapshot is received from the bookSnapshots channel
-//  2. The context is cancelled
-func (c *WebSocketClient) GetBookSnapshot(ctx context.Context) (*kraken.BookSnapshot, error) {
+// Subscribe allows external code to subscribe to specific event types
+func (c *WebSocketClient) Subscribe(eventType EventType, handler EventHandler) {
+	c.eventsMutex.Lock()
+	defer c.eventsMutex.Unlock()
+	c.eventHandlers[eventType] = append(c.eventHandlers[eventType], handler)
+}
+
+// emit sends an event to all registered handlers
+func (c *WebSocketClient) emit(event Event) {
+	c.eventsMutex.RLock()
+	handlers := c.eventHandlers[event.Type]
+	c.eventsMutex.RUnlock()
+
+	// Don't emit events if we're shutting down
 	select {
-	case snapshot := <-c.bookSnapshots:
-		return &snapshot, nil
-	case <-c.doneChan:
-		return nil, fmt.Errorf("client is shutting down")
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-c.shutdown:
+		c.logger.Debug("Shutting down, not emitting event")
+		return
+	default:
+		for _, handler := range handlers {
+			handler(event)
+		}
 	}
 }
 
@@ -181,17 +182,7 @@ func (c *WebSocketClient) waitForSystemStatus(ctx context.Context) error {
 				return fmt.Errorf("failed to read status message: %w", err)
 			}
 
-			// For v2 API
-			var msg struct {
-				Channel string `json:"channel"` // "status"
-				Type    string `json:"type"`    // "update"
-				Data    []struct {
-					System       string `json:"system"`
-					APIVersion   string `json:"api_version"`
-					ConnectionID uint64 `json:"connection_id"`
-					Version      string `json:"version"`
-				} `json:"data"`
-			}
+			var msg kraken.StatusMessage
 			if err := json.Unmarshal(message, &msg); err != nil {
 				c.logger.Debugf("Not a status message: %s, error: %s", string(message), err.Error())
 				continue
