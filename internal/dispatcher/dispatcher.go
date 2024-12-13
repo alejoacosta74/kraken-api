@@ -5,10 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/alejoacosta74/go-logger"
 	"github.com/alejoacosta74/kraken-api/internal/events"
+	"github.com/alejoacosta74/kraken-api/internal/kafka"
 	"github.com/alejoacosta74/kraken-api/pkg/kraken"
+)
+
+const (
+	KafkaProducerPoolSize = 3
 )
 
 // MessageType represents different types of messages that can be received from the WebSocket API
@@ -53,6 +59,8 @@ type Dispatcher struct {
 
 	// Mutex for thread-safe access to the handlers map
 	handlerMutex sync.RWMutex
+
+	producerPool kafka.ProducerPool
 }
 
 // NewDispatcher creates and initializes a new message dispatcher.
@@ -64,14 +72,18 @@ type Dispatcher struct {
 //
 // Returns:
 //   - A configured Dispatcher instance ready to start processing messages
-func NewDispatcher(msgChan chan []byte, errChan chan error, eventBus events.Bus) *Dispatcher {
-	return &Dispatcher{
-		handlers: make(map[MessageType]MessageHandler),
-		eventBus: eventBus,
-		logger:   logger.Log,
-		msgChan:  msgChan,
-		errChan:  errChan,
+func NewDispatcher(ctx context.Context, msgChan chan []byte, errChan chan error, eventBus events.Bus) *Dispatcher {
+	producerPool := kafka.NewProducerPool(ctx, KafkaProducerPoolSize)
+	d := &Dispatcher{
+		handlers:     make(map[MessageType]MessageHandler),
+		eventBus:     eventBus,
+		logger:       logger.WithField("component", "dispatcher"),
+		msgChan:      msgChan,
+		errChan:      errChan,
+		producerPool: producerPool,
 	}
+
+	return d
 }
 
 // RegisterHandler registers a handler for a specific message type.
@@ -85,6 +97,7 @@ func NewDispatcher(msgChan chan []byte, errChan chan error, eventBus events.Bus)
 //
 //	dispatcher.RegisterHandler(TypeBookSnapshot, NewBookSnapshotHandler())
 func (d *Dispatcher) RegisterHandler(msgType MessageType, handler MessageHandler) {
+	d.logger.Debug("Registering handler for message type:", msgType)
 	d.handlerMutex.Lock()
 	defer d.handlerMutex.Unlock()
 	d.handlers[msgType] = handler
@@ -107,17 +120,44 @@ func (d *Dispatcher) RegisterHandler(msgType MessageType, handler MessageHandler
 //  4. Report any errors on errChan
 func (d *Dispatcher) Run(ctx context.Context) {
 	d.logger.Info("Starting dispatcher")
+	defer d.logger.Info("Dispatcher shutdown complete")
 
+	// Start the producer pool
+	d.producerPool.Start()
+	d.logger.Debug("Producer pool started")
+
+	var wg sync.WaitGroup
 	for {
 		select {
 		case <-ctx.Done():
-			d.logger.Info("Shutting down dispatcher")
+			d.logger.Trace("Context cancelled, waiting for in-flight messages to complete")
+			wg.Wait()
+			d.logger.Trace("All in-flight messages completed")
+			// Create a timeout channel for producer pool shutdown
+			timeout := time.After(12 * time.Second)
+			done := make(chan struct{})
+			d.logger.Trace("Stopping producer pool")
+			go func() {
+				d.producerPool.Stop()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				d.logger.Trace("Producer pool stopped successfully")
+			case <-timeout:
+				d.logger.Error("Timeout waiting for producer pool to stop")
+			}
 			return
 
 		case msg := <-d.msgChan:
-			if err := d.dispatch(ctx, msg); err != nil {
-				d.errChan <- fmt.Errorf("dispatch error: %w", err)
-			}
+			wg.Add(1)
+			go func(msg []byte) {
+				defer wg.Done()
+				if err := d.dispatch(ctx, msg); err != nil {
+					d.errChan <- fmt.Errorf("dispatch error: %w", err)
+				}
+			}(msg)
 		}
 	}
 }
@@ -150,16 +190,17 @@ func (d *Dispatcher) dispatch(ctx context.Context, msg []byte) error {
 
 	// Determine message type
 	msgType := d.determineMessageType(genericMsg)
-
+	d.logger.Tracef("Message type: %s", msgType)
 	// Get handler for message type (thread-safe)
 	d.handlerMutex.RLock()
 	handler, exists := d.handlers[msgType]
 	d.handlerMutex.RUnlock()
 
 	if !exists {
+		d.logger.Errorf("No handler registered for message type: %s. Message: %s", msgType, string(msg))
 		return fmt.Errorf("no handler registered for message type: %s", msgType)
 	}
-
+	d.logger.Tracef("Handler found for message type: %s", msgType)
 	// Handle the message
 	if err := handler.Handle(ctx, msg); err != nil {
 		return fmt.Errorf("handler error for message type %s: %w", msgType, err)
@@ -168,6 +209,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, msg []byte) error {
 	// Publish event about message processing
 	// This is now clearly the dispatcher's responsibility
 	d.eventBus.Publish(string(msgType), msg)
+	d.logger.Tracef("Event published: %s", string(msgType))
 
 	return nil
 }
@@ -187,6 +229,9 @@ func (d *Dispatcher) dispatch(ctx context.Context, msg []byte) error {
 //   - Heartbeat: channel="heartbeat"
 //   - System: channel="system"
 func (d *Dispatcher) determineMessageType(msg kraken.GenericResponse) MessageType {
+	// Add debug logging
+	d.logger.Debug("Received message - Channel:", msg.Channel, "Type:", msg.Type, "Method:", msg.Method)
+
 	switch {
 	case msg.Channel == "book" && msg.Type == "snapshot":
 		return TypeBookSnapshot
@@ -196,7 +241,15 @@ func (d *Dispatcher) determineMessageType(msg kraken.GenericResponse) MessageTyp
 		return TypeHeartbeat
 	case msg.Channel == "system":
 		return TypeSystem
+	case msg.Method == "subscribe": // Add handling for subscription responses
+		return "subscription_response"
 	default:
+		d.logger.Debug("Unknown message type:", string(msg.Channel), msg.Type, msg.Method)
 		return MessageType("unknown")
 	}
+}
+
+// GetProducerPool returns the dispatcher's producer pool
+func (d *Dispatcher) GetProducerPool() kafka.ProducerPool {
+	return d.producerPool
 }

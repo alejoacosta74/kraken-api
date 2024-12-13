@@ -5,14 +5,17 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/alejoacosta74/go-logger"
 	disp "github.com/alejoacosta74/kraken-api/internal/dispatcher"
 	"github.com/alejoacosta74/kraken-api/internal/dispatcher/handlers"
 	"github.com/alejoacosta74/kraken-api/internal/events"
-	"github.com/alejoacosta74/kraken-api/internal/kafka"
 	"github.com/alejoacosta74/kraken-api/internal/metrics"
-	"github.com/alejoacosta74/kraken-api/internal/ui"
 	"github.com/alejoacosta74/kraken-api/internal/ws"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -34,8 +37,16 @@ func init() {
 	rootCmd.AddCommand(startCmd)
 	// Add trading pair flag with default value "ETH/USD"
 	startCmd.Flags().String("pair", "ETH/USD", "Trading pair to subscribe to")
-	// Bind the flag to viper for configuration management
+	// Add metrics configuration flags
+	startCmd.Flags().String("metrics-addr", ":2112", "Address to serve metrics on")
+	startCmd.Flags().Int("metrics-buffer", 100, "Buffer size for metrics channels")
+	// Add kafka configuration flags
+	startCmd.Flags().StringSlice("kafka-cluster-addresses", []string{"192.168.4.248:9092"}, "Kafka cluster addresses")
+	// Bind all flags to viper
 	viper.BindPFlag("tradingpair", startCmd.Flags().Lookup("pair"))
+	viper.BindPFlag("metrics.addr", startCmd.Flags().Lookup("metrics-addr"))
+	viper.BindPFlag("metrics.buffer", startCmd.Flags().Lookup("metrics-buffer"))
+	viper.BindPFlag("kafka.cluster.addresses", startCmd.Flags().Lookup("kafka-cluster-addresses"))
 }
 
 // runStart is the main entry point for the WebSocket client application.
@@ -57,57 +68,40 @@ func runStart(cmd *cobra.Command, args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Set up signal handling for graceful shutdown
-	go handleSignals(cancel)
-
-	// Initialize channels for internal communication
-	// msgChan: carries WebSocket messages from reader to handlers
-	// errChan: carries errors from various components
-	msgChan := make(chan []byte, 100) // Buffer size 100 to prevent blocking
-	errChan := make(chan error, 10)   // Buffer size 10 for errors
-
-	// Create event bus
-	eventBus := events.NewEventBus()
-
-	// Create dispatcher
-	dispatcher := disp.NewDispatcher(msgChan, errChan, eventBus)
-
-	// Create Kafka producer
-	kafkaProducer, err := kafka.NewProducer([]string{"192.168.5.142:9092"})
-	if err != nil {
-		logger.Fatal("Failed to create Kafka producer:", err)
-	}
-	defer kafkaProducer.Close()
-
-	// Create and register handlers
-	baseHandler := handlers.NewBaseHandler(kafkaProducer, "book_snapshots")
-	snapshotHandler := handlers.NewBookSnapshotHandler(baseHandler)
-	dispatcher.RegisterHandler(disp.TypeBookSnapshot, snapshotHandler)
-
-	// Register debug handler for all message types
-	debugHandler := handlers.NewDebugHandler()
-	dispatcher.RegisterHandler(disp.TypeBookUpdate, debugHandler)
-	dispatcher.RegisterHandler(disp.TypeHeartbeat, debugHandler)
-	dispatcher.RegisterHandler(disp.TypeSystem, debugHandler)
-
-	// Initialize metrics collector
-	metricsCollector := metrics.NewMetricsCollector(eventBus, metrics.Config{
-		MetricsAddr: ":2112",
-	})
-
-	// Start metrics collector
+	// Set up signal handling - simplified
 	go func() {
-		if err := metricsCollector.Start(ctx, metrics.Config{MetricsAddr: ":2112"}); err != nil {
-			logger.Error("Metrics collector error:", err)
-		}
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		cancel() // Single point of shutdown initiation
 	}()
 
-	// Initialize UI updater
-	uiUpdater := ui.NewUIUpdater(eventBus)
-	go uiUpdater.Start()
+	// Create components
+	eventBus := events.NewEventBus()
+	metricsServer := metrics.NewMetricsServer(viper.GetString("metrics.addr"))
+	metricsRecorder := metrics.NewMetricsRecorder(ctx, eventBus)
 
-	// Start dispatcher
-	go dispatcher.Run(ctx)
+	// Create channels for WebSocket communication
+	msgChan := make(chan []byte, 100)
+	errChan := make(chan error, 10)
+
+	// Create and configure dispatcher
+	dispatcher := disp.NewDispatcher(ctx, msgChan, errChan, eventBus)
+
+	// Create base handler with producer pool
+	baseHandler := handlers.NewBaseHandler(dispatcher.GetProducerPool(), "kraken_book")
+
+	// Create handlers
+	debugHandler := handlers.NewDebugHandler()
+	snapshotHandler := handlers.NewBookSnapshotHandler(baseHandler)
+	updateHandler := handlers.NewBookUpdateHandler(baseHandler)
+
+	// Register handlers with dispatcher
+	dispatcher.RegisterHandler(disp.TypeBookSnapshot, snapshotHandler)
+	dispatcher.RegisterHandler(disp.TypeBookUpdate, updateHandler)
+	dispatcher.RegisterHandler(disp.TypeHeartbeat, debugHandler)
+	dispatcher.RegisterHandler(disp.TypeSystem, debugHandler)
+	dispatcher.RegisterHandler("subscription_response", debugHandler)
 
 	// Create WebSocket client
 	wsClient := ws.NewWebSocketClient(
@@ -116,26 +110,75 @@ func runStart(cmd *cobra.Command, args []string) {
 		ws.WithBuffers(msgChan, errChan),
 	)
 
-	// Start error handling goroutine
-	// This will be enhanced with more sophisticated error handling in future iterations
+	// Start components with a single WaitGroup
+	var wg sync.WaitGroup
+
+	// Start metrics server
+	wg.Add(1)
 	go func() {
-		for err := range errChan {
-			logger.Error("WebSocket error:", err)
+		defer wg.Done()
+		if err := metricsServer.Start(ctx); err != nil {
+			logger.Error("Metrics server error:", err)
 		}
 	}()
 
-	// Start message handling goroutine
-	// This is a temporary implementation that will be replaced by the dispatcher
+	// Start metrics recorder
+	wg.Add(1)
 	go func() {
-		for msg := range msgChan {
-			logger.Debug("Received message:", string(msg))
+		defer wg.Done()
+		if err := metricsRecorder.Start(ctx); err != nil {
+			logger.Error("Metrics recorder error:", err)
 		}
 	}()
 
-	// Run the client and handle any fatal errors
-	if err := wsClient.Run(ctx); err != nil {
-		logger.Error("WebSocket client error:", err)
+	// Start dispatcher
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		dispatcher.Run(ctx)
+	}()
+
+	// Start WebSocket client
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := wsClient.Run(ctx); err != nil {
+			logger.Error("WebSocket client error:", err)
+		}
+	}()
+
+	// Wait for context cancellation
+	<-ctx.Done()
+	logger.Info("Shutdown initiated")
+
+	// Wait for components with timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer shutdownCancel()
+
+	// Create channels to track individual component shutdown
+	dispatcherDone := make(chan struct{})
+	// metricsDone := make(chan struct{})
+	// wsClientDone := make(chan struct{})
+
+	// Wait for dispatcher with timeout
+	go func() {
+		wg.Wait()
+		close(dispatcherDone)
+	}()
+
+	// Wait for each component with individual timeouts
+	select {
+	case <-dispatcherDone:
+		logger.Info("All components shut down cleanly")
+	case <-shutdownCtx.Done():
+		logger.Error("Shutdown timeout - checking individual components")
+		// Log which components are still running
+		select {
+		case <-dispatcherDone:
+			logger.Info("Dispatcher shut down")
+		default:
+			logger.Error("Dispatcher failed to shut down")
+		}
+		// ... similar checks for other components
 	}
-
-	logger.Info("Client shutdown complete")
 }

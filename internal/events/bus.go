@@ -2,6 +2,8 @@ package events
 
 import (
 	"sync"
+
+	"github.com/alejoacosta74/go-logger"
 )
 
 // Bus defines the interface for event bus operations
@@ -33,6 +35,8 @@ type EventBus struct {
 	// shutdownCh is closed when the event bus is shutting down
 	// All subscriber goroutines monitor this channel to clean up
 	shutdownCh chan struct{}
+
+	logger *logger.Logger
 }
 
 // NewEventBus creates a new EventBus instance.
@@ -42,6 +46,7 @@ func NewEventBus() *EventBus {
 		subscribers:       make(map[string]map[chan interface{}]struct{}),
 		channelBufferSize: 100, // Buffer up to 100 events per subscriber
 		shutdownCh:        make(chan struct{}),
+		logger:            logger.WithField("component", "event_bus"),
 	}
 }
 
@@ -60,9 +65,10 @@ func (b *EventBus) Publish(topic string, event interface{}) {
 	// Get the subscriber channels for this topic
 	subscribers, exists := b.subscribers[topic]
 	if !exists {
+		b.logger.Trace("No subscribers for this topic")
 		return // No subscribers for this topic
 	}
-
+	b.logger.Tracef("Publishing received event length  to topic %s subscribers", topic)
 	// Send to each subscriber non-blocking
 	for subscriberCh := range subscribers {
 		select {
@@ -70,6 +76,7 @@ func (b *EventBus) Publish(topic string, event interface{}) {
 			// Event sent successfully
 		default:
 			// Channel full, drop event for this subscriber
+			b.logger.Warn("Channel full, dropping event for this subscriber")
 		}
 	}
 }
@@ -99,7 +106,7 @@ func (b *EventBus) Subscribe(topic string) <-chan interface{} {
 
 	// Add the channel to the subscribers map
 	b.subscribers[topic][ch] = struct{}{}
-
+	b.logger.Debugf("Subscribed to topic %s", topic)
 	return ch
 }
 
@@ -120,6 +127,7 @@ func (b *EventBus) Unsubscribe(topic string, ch <-chan interface{}) {
 
 	subscribers, exists := b.subscribers[topic]
 	if !exists {
+		b.logger.Trace("No subscribers for this topic")
 		return
 	}
 
@@ -129,12 +137,14 @@ func (b *EventBus) Unsubscribe(topic string, ch <-chan interface{}) {
 		if ch == subCh {
 			delete(subscribers, subCh)
 			close(subCh)
+			b.logger.Tracef("Unsubscribed from topic %s", topic)
 			break
 		}
 	}
 
 	// Clean up topic if no more subscribers
 	if len(subscribers) == 0 {
+		b.logger.Tracef("No more subscribers for topic %s, removing", topic)
 		delete(b.subscribers, topic)
 	}
 }
@@ -142,6 +152,7 @@ func (b *EventBus) Unsubscribe(topic string, ch <-chan interface{}) {
 // Shutdown gracefully shuts down the event bus.
 // It closes all subscriber channels and cleans up resources.
 func (b *EventBus) Shutdown() {
+	b.logger.Debug("Shutting down event bus")
 	// Signal shutdown
 	close(b.shutdownCh)
 
@@ -155,6 +166,7 @@ func (b *EventBus) Shutdown() {
 		}
 		delete(b.subscribers, topic)
 	}
+	b.logger.Debug("Event bus shutdown complete")
 }
 
 // TopicSubscriberCount returns the number of subscribers for a topic.

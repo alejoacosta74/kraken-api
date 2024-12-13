@@ -17,7 +17,7 @@ type DebugHandler struct {
 // NewDebugHandler creates a new debug handler
 func NewDebugHandler() *DebugHandler {
 	return &DebugHandler{
-		logger: logger.Log,
+		logger: logger.WithField("component", "debug_handler"),
 	}
 }
 
@@ -29,6 +29,6 @@ func (h *DebugHandler) Handle(ctx context.Context, msg []byte) error {
 		return fmt.Errorf("error formatting JSON: %w", err)
 	}
 
-	h.logger.Info("Received message:\n", prettyJSON.String())
+	h.logger.Trace("Received message:\n", prettyJSON.String())
 	return nil
 }

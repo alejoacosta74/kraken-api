@@ -1,7 +1,6 @@
 package kafka
 
 import (
-	"context"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -9,13 +8,12 @@ import (
 
 // Producer wraps Sarama's SyncProducer with additional functionality
 type Producer struct {
-	client     sarama.SyncProducer
-	workerPool *WorkerPool
+	sarama.SyncProducer
 }
 
 // SendMessage sends a message to a Kafka topic.
 // It implements our application's producer interface.
-func (p *Producer) SendMessage(ctx context.Context, topic string, msg []byte) error {
+func (p *Producer) SendMessage(topic string, msg []byte) error {
 	// Create Kafka message
 	message := &sarama.ProducerMessage{
 		Topic:     topic,
@@ -24,7 +22,7 @@ func (p *Producer) SendMessage(ctx context.Context, topic string, msg []byte) er
 	}
 
 	// Send message synchronously
-	partition, offset, err := p.client.SendMessage(message)
+	partition, offset, err := p.SyncProducer.SendMessage(message)
 	if err != nil {
 		return err
 	}
@@ -51,16 +49,6 @@ func NewProducer(brokers []string) (*Producer, error) {
 	}
 
 	return &Producer{
-		client: client,
+		SyncProducer: client,
 	}, nil
-}
-
-// Close closes the producer and releases resources
-func (p *Producer) Close() error {
-	return p.client.Close()
-}
-
-type WorkerPool struct {
-	// workers []*Worker
-	// jobs    chan *ProducerJob
 }
