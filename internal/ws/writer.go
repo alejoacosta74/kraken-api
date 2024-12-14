@@ -67,8 +67,10 @@ func (w *Writer) Run() {
 			select {
 			case <-w.ctx.Done():
 				w.handleWriterShutdown()
+				return
 			case <-w.stopChan:
 				w.handleWriterShutdown()
+				return
 			case msg := <-w.writeChan:
 				w.mutex.Lock()
 				w.logger.Tracef("Writing message to WebSocket: %s", string(msg))
@@ -87,7 +89,6 @@ func (w *Writer) Run() {
 	}()
 
 	<-writerDone
-	w.logger.Debug("Writer shutdown complete")
 }
 
 // Write queues a message for sending over the WebSocket connection.

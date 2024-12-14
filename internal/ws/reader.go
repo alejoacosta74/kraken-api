@@ -14,9 +14,10 @@ import (
 type Reader struct {
 	ctx      context.Context
 	conn     *websocket.Conn // The WebSocket connection to read from
-	msgChan  chan<- []byte   // Channel for forwarding received messages to the dispatcher
-	errChan  chan<- error    // Channel for reporting errors to client
-	doneChan chan struct{}   //Channel for signaling that the reader has shutdown
+	mutex    sync.Mutex
+	msgChan  chan<- []byte // Channel for forwarding received messages to the dispatcher
+	errChan  chan<- error  // Channel for reporting errors to client
+	doneChan chan struct{} //Channel for signaling that the reader has shutdown
 	logger   *logger.Logger
 	wg       *sync.WaitGroup
 }
@@ -37,6 +38,7 @@ func NewReader(ctx context.Context, conn *websocket.Conn, msgChan chan []byte, e
 		doneChan: doneChan,
 		logger:   logger.WithField("component", "ws_reader"),
 		wg:       wg,
+		mutex:    sync.Mutex{},
 	}
 }
 
@@ -64,7 +66,9 @@ func (r *Reader) Run() {
 	go func() {
 		defer close(readDone)
 		for {
+			r.mutex.Lock()
 			_, message, err := r.conn.ReadMessage()
+			r.mutex.Unlock()
 			if err != nil {
 				if r.ctx.Err() != nil {
 					// Context was cancelled, exit quietly

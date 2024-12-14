@@ -10,7 +10,7 @@ import (
 )
 
 // MessageHandler is a function that processes a received message and returns a response
-type MessageHandler func([]byte) []byte
+type MessageHandler func([]byte) interface{}
 
 // MockWebSocketServer represents a mock WebSocket server for testing
 type MockWebSocketServer struct {
@@ -77,17 +77,15 @@ func (m *MockWebSocketServer) readMessages(conn *websocket.Conn) {
 		if err != nil {
 			return
 		}
-
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		m.ReceivedMessages = append(m.ReceivedMessages, message)
-
+		m.mu.Unlock()
 		// Handle message and send response
 		msgType := m.determineMessageType(message)
 		if handler, ok := m.messageHandlers[msgType]; ok {
 			response := handler(message)
 			if response != nil {
-				err := conn.WriteMessage(websocket.TextMessage, response)
+				err := conn.WriteJSON(response)
 				if err != nil {
 					return
 				}

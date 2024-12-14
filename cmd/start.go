@@ -83,10 +83,10 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// Create channels for WebSocket communication
 	msgChan := make(chan []byte, 100)
-	errChan := make(chan error, 10)
+	dispatcherErrChan := make(chan error, 10)
 
 	// Create and configure dispatcher
-	dispatcher := disp.NewDispatcher(ctx, msgChan, errChan, eventBus)
+	dispatcher := disp.NewDispatcher(ctx, msgChan, dispatcherErrChan, eventBus)
 
 	// Create base handler with producer pool
 	baseHandler := handlers.NewBaseHandler(dispatcher.GetProducerPool(), "kraken_book")
@@ -104,11 +104,17 @@ func runStart(cmd *cobra.Command, args []string) {
 	dispatcher.RegisterHandler("subscription_response", debugHandler)
 
 	// Create WebSocket client
-	wsClient := ws.NewWebSocketClient(
-		wsUrl,
-		ws.WithTradingPair(pair),
-		ws.WithBuffers(msgChan, errChan),
-	)
+	wsErrChan := make(chan error, 10)
+	wsDoneChan := make(chan struct{})
+	clientCfg := ws.ClientConfig{
+		Ctx:      ctx,
+		Url:      wsUrl,
+		MsgChan:  msgChan,
+		ErrChan:  wsErrChan,
+		DoneChan: wsDoneChan,
+		Opts:     []ws.Option{ws.WithTradingPair(pair)},
+	}
+	wsClient := ws.NewWebSocketClient(clientCfg)
 
 	// Start components with a single WaitGroup
 	var wg sync.WaitGroup
@@ -142,9 +148,10 @@ func runStart(cmd *cobra.Command, args []string) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := wsClient.Run(ctx); err != nil {
-			logger.Error("WebSocket client error:", err)
+		if err := wsClient.Run(); err != nil {
+			logger.Fatalf("WebSocket client error: %v", err)
 		}
+		<-wsDoneChan
 	}()
 
 	// Wait for context cancellation
