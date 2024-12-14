@@ -31,7 +31,7 @@ const (
 // MessageHandler defines the interface that all message handlers must implement.
 // This allows for a pluggable architecture where new handlers can be easily added.
 type MessageHandler interface {
-	Handle(ctx context.Context, msg []byte) error
+	Handle(msg []byte) error
 }
 
 // Dispatcher manages the routing of WebSocket messages to appropriate handlers.
@@ -50,7 +50,7 @@ type Dispatcher struct {
 	// Channel for receiving messages from the WebSocket reader
 	// Sender: WebSocket Reader
 	// Receivers: Dispatcher's Run() method
-	msgChan chan []byte
+	msgChan <-chan []byte
 
 	// Channel for reporting errors from handlers and dispatcher
 	// Senders: Dispatcher, MessageHandlers
@@ -181,7 +181,7 @@ func (d *Dispatcher) Run(ctx context.Context) {
 //  3. Look up handler
 //  4. Execute handler
 //  5. Publish event
-func (d *Dispatcher) dispatch(ctx context.Context, msg []byte) error {
+func (d *Dispatcher) dispatch(msg []byte) error {
 	// Parse the generic response to determine message type
 	var genericMsg kraken.GenericResponse
 	if err := json.Unmarshal(msg, &genericMsg); err != nil {
@@ -202,7 +202,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, msg []byte) error {
 	}
 	d.logger.Tracef("Handler found for message type: %s", msgType)
 	// Handle the message
-	if err := handler.Handle(ctx, msg); err != nil {
+	if err := handler.Handle(msg); err != nil {
 		return fmt.Errorf("handler error for message type %s: %w", msgType, err)
 	}
 

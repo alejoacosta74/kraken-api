@@ -94,12 +94,12 @@ func (p *WorkerPool) Start() {
 //
 // Returns:
 //   - error: nil on success, ctx.Err() if context is cancelled
-func (p *WorkerPool) SendMessage(ctx context.Context, topic string, msg []byte) error {
+func (p *WorkerPool) SendMessage(topic string, msg []byte) error {
 	select {
 	case p.msgChan <- producerMessage{topic: topic, payload: msg}:
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-p.ctx.Done():
+		return p.ctx.Err()
 	}
 }
 

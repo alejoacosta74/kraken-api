@@ -11,22 +11,31 @@ import (
 // Writer handles writing messages to a WebSocket connection.
 // It provides thread-safe message writing and manages its own message queue.
 type Writer struct {
+	ctx       context.Context
 	conn      *websocket.Conn // The WebSocket connection to write to
 	writeChan chan []byte     // Channel for queuing messages to be sent
-	done      chan struct{}   // Channel to signal when writer is shutting down
+	doneChan  chan struct{}   // Channel to signal when writer is shutting down
+	errChan   chan<- error    // Channel for reporting errors to client
+	stopChan  chan struct{}   // Channel to receive request to stop
 	mutex     sync.Mutex      // Mutex for thread-safe writing
 	logger    *logger.Logger
+	wg        *sync.WaitGroup
 }
 
 // NewWriter creates a new Writer instance.
 // It initializes the write channel with a buffer to prevent blocking
 // and a done channel for clean shutdown.
-func NewWriter(conn *websocket.Conn) *Writer {
+func NewWriter(ctx context.Context, conn *websocket.Conn, errChan chan error, doneChan chan struct{}, stopChan chan struct{}, wg *sync.WaitGroup) *Writer {
 	return &Writer{
 		conn:      conn,
 		writeChan: make(chan []byte, 100), // Buffer up to 100 messages
-		done:      make(chan struct{}),
+		doneChan:  doneChan,
+		errChan:   errChan,
+		stopChan:  stopChan,
 		logger:    logger.WithField("component", "ws_writer"),
+		ctx:       ctx,
+		mutex:     sync.Mutex{},
+		wg:        wg,
 	}
 }
 
@@ -42,43 +51,43 @@ func NewWriter(conn *websocket.Conn) *Writer {
 //
 // Parameters:
 //   - ctx: Context for cancellation
-func (w *Writer) Run(ctx context.Context) {
+func (w *Writer) Run() {
 	w.logger.Debug("Starting writer")
 	defer func() {
-		close(w.done)
+		close(w.doneChan)
+		w.wg.Done()
 		w.logger.Debug("Writer shutdown complete")
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			// Drain any pending messages
-			w.logger.Trace("Draining pending messages")
-			for {
-				select {
-				case <-w.writeChan:
-					// Discard remaining messages
-				default:
-					w.logger.Debug("No more messages to drain, exiting")
+	writerDone := make(chan struct{})
+
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-w.ctx.Done():
+				w.handleWriterShutdown()
+			case <-w.stopChan:
+				w.handleWriterShutdown()
+			case msg := <-w.writeChan:
+				w.mutex.Lock()
+				w.logger.Tracef("Writing message to WebSocket: %s", string(msg))
+				err := w.conn.WriteMessage(websocket.TextMessage, msg)
+				w.mutex.Unlock()
+				if err != nil {
+					w.logger.Errorf("Error writing message to WebSocket: %v", err)
+					// Log error but don't send to error channel during shutdown
+					if w.ctx.Err() == nil {
+						w.errChan <- err
+					}
 					return
 				}
 			}
-		case msg := <-w.writeChan:
-			w.mutex.Lock()
-			w.logger.Tracef("Writing message to WebSocket: %s", string(msg))
-			err := w.conn.WriteMessage(websocket.TextMessage, msg)
-			w.mutex.Unlock()
-			if err != nil {
-				w.logger.Errorf("Error writing message to WebSocket: %v", err)
-				// Log error but don't send to error channel during shutdown
-				if ctx.Err() == nil {
-					w.logger.Errorf("Context error: %v", ctx.Err())
-					// TODO: Handle error through error channel
-				}
-				return
-			}
 		}
-	}
+	}()
+
+	<-writerDone
+	w.logger.Debug("Writer shutdown complete")
 }
 
 // Write queues a message for sending over the WebSocket connection.
@@ -93,7 +102,20 @@ func (w *Writer) Run(ctx context.Context) {
 func (w *Writer) Write(msg []byte) {
 	select {
 	case w.writeChan <- msg:
-	case <-w.done:
+	case <-w.ctx.Done():
 		return
+	}
+}
+
+func (w *Writer) handleWriterShutdown() {
+	w.logger.Trace("Draining pending messages")
+	for {
+		select {
+		case <-w.writeChan:
+			// Discard remaining messages
+		default:
+			w.logger.Debug("No more messages to drain, exiting")
+			return
+		}
 	}
 }

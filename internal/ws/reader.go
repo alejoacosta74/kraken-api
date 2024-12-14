@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/alejoacosta74/go-logger"
@@ -11,11 +12,13 @@ import (
 // Reader handles reading messages from a WebSocket connection.
 // It runs in its own goroutine and forwards messages to a channel for processing.
 type Reader struct {
-	conn    *websocket.Conn // The WebSocket connection to read from
-	msgChan chan []byte     // Channel for forwarding received messages
-	errChan chan error      // Channel for reporting errors
-	done    chan struct{}   // Signal for complete shutdown
-	logger  *logger.Logger
+	ctx      context.Context
+	conn     *websocket.Conn // The WebSocket connection to read from
+	msgChan  chan<- []byte   // Channel for forwarding received messages to the dispatcher
+	errChan  chan<- error    // Channel for reporting errors to client
+	doneChan chan struct{}   //Channel for signaling that the reader has shutdown
+	logger   *logger.Logger
+	wg       *sync.WaitGroup
 }
 
 // NewReader creates a new Reader instance.
@@ -23,13 +26,17 @@ type Reader struct {
 //   - conn: The WebSocket connection to read from
 //   - msgChan: Channel where received messages will be sent
 //   - errChan: Channel where errors will be reported
-func NewReader(conn *websocket.Conn, msgChan chan []byte, errChan chan error) *Reader {
+//   - doneChan: Channel for signaling that the reader has shutdown
+//   - wg: WaitGroup for reader
+func NewReader(ctx context.Context, conn *websocket.Conn, msgChan chan []byte, errChan chan error, doneChan chan struct{}, wg *sync.WaitGroup) *Reader {
 	return &Reader{
-		conn:    conn,
-		msgChan: msgChan,
-		errChan: errChan,
-		done:    make(chan struct{}),
-		logger:  logger.WithField("component", "ws_reader"),
+		ctx:      ctx,
+		conn:     conn,
+		msgChan:  msgChan,
+		errChan:  errChan,
+		doneChan: doneChan,
+		logger:   logger.WithField("component", "ws_reader"),
+		wg:       wg,
 	}
 }
 
@@ -42,10 +49,11 @@ func NewReader(conn *websocket.Conn, msgChan chan []byte, errChan chan error) *R
 //
 // Parameters:
 //   - ctx: Context for cancellation
-func (r *Reader) Run(ctx context.Context) {
+func (r *Reader) Run() {
 	r.logger.Debug("Starting reader")
 	defer func() {
-		close(r.done)
+		close(r.doneChan)
+		r.wg.Done()
 		r.logger.Debug("Reader shutdown complete")
 	}()
 
@@ -58,7 +66,7 @@ func (r *Reader) Run(ctx context.Context) {
 		for {
 			_, message, err := r.conn.ReadMessage()
 			if err != nil {
-				if ctx.Err() != nil {
+				if r.ctx.Err() != nil {
 					// Context was cancelled, exit quietly
 					r.logger.Debug("Context cancelled, reader exiting")
 					return
@@ -66,8 +74,7 @@ func (r *Reader) Run(ctx context.Context) {
 				// Only report errors if we're not shutting down
 				select {
 				case r.errChan <- err:
-					r.logger.Error("Error reading message:", err)
-				case <-ctx.Done():
+				case <-r.ctx.Done():
 					// Don't send error if we're shutting down
 				}
 				return
@@ -75,7 +82,7 @@ func (r *Reader) Run(ctx context.Context) {
 
 			// Try to send message, but also check for shutdown
 			select {
-			case <-ctx.Done():
+			case <-r.ctx.Done():
 				r.logger.Debug("Context cancelled, reader exiting")
 				return
 			case r.msgChan <- message:
@@ -86,17 +93,17 @@ func (r *Reader) Run(ctx context.Context) {
 
 	// Wait for either context cancellation or read loop completion
 	select {
-	case <-ctx.Done():
+	case <-r.ctx.Done():
 		r.logger.Debug("Context cancelled, forcing reader shutdown")
 		r.conn.SetReadDeadline(time.Now()) // Force read to unblock
 		<-readDone                         // Wait for read loop to exit
+		r.logger.Trace("Read loop exited")
 	case <-readDone:
-		r.logger.Debug("Read loop completed naturally")
+		r.logger.Trace("Read loop completed naturally")
 	}
 }
 
 // Done returns a channel that's closed when the reader has completely shut down
 func (r *Reader) Done() <-chan struct{} {
-	r.logger.Trace("Done channel requested")
-	return r.done
+	return r.doneChan
 }

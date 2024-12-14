@@ -26,6 +26,8 @@ type WebSocketClient struct {
 	reader       *Reader         // Handles reading messages from WebSocket
 	shutdownChan chan struct{}   // Signal for graceful shutdown
 	done         chan struct{}   // Signals when shutdown is complete
+	ctx          context.Context // Context for cancellation
+	wg           *sync.WaitGroup // WaitGroup for reader and writer
 }
 
 // Option defines a function type for configuring the WebSocketClient.
@@ -51,12 +53,15 @@ func WithBuffers(msgChan chan []byte, errChan chan error) Option {
 
 // NewWebSocketClient creates a new WebSocket client with the given URL and options.
 // It initializes the client but does not establish the connection.
-func NewWebSocketClient(url string, opts ...Option) *WebSocketClient {
+func NewWebSocketClient(ctx context.Context, url string, msgChan chan []byte, opts ...Option) *WebSocketClient {
 	c := &WebSocketClient{
 		url:          url,
 		logger:       logger.WithField("component", "ws_client"),
+		msgChan:      msgChan,
 		shutdownChan: make(chan struct{}),
 		done:         make(chan struct{}),
+		ctx:          ctx,
+		wg:           &sync.WaitGroup{},
 	}
 
 	// Apply all provided options
@@ -76,7 +81,7 @@ func NewWebSocketClient(url string, opts ...Option) *WebSocketClient {
 // 5. Waits for context cancellation
 //
 // The method blocks until the context is cancelled or an error occurs.
-func (c *WebSocketClient) Run(ctx context.Context) error {
+func (c *WebSocketClient) Run() error {
 	c.logger.Debug("Starting WebSocket client")
 	defer close(c.done)
 
@@ -85,34 +90,36 @@ func (c *WebSocketClient) Run(ctx context.Context) error {
 	}
 
 	// Initialize reader and writer
-	c.writer = NewWriter(c.conn)
-	c.reader = NewReader(c.conn, c.msgChan, c.errChan)
+	writerDoneChan := make(chan struct{})
+	writeStopChan := make(chan struct{})
+	c.writer = NewWriter(c.ctx, c.conn, c.errChan, writerDoneChan, writeStopChan, c.wg)
+
+	c.wg.Add(1)
+	go c.writer.Run()
 
 	// Subscribe to order book after connection is established
-	if err := c.subscribeToOrderBook(); err != nil {
+	if err := c.subscribeToOrderBook(c.msgChan); err != nil {
+		c.logger.Error("subscription failed: %w", err)
+		// stop the writer
+		close(writeStopChan)
 		return fmt.Errorf("subscription failed: %w", err)
 	}
 
-	// Start reader and writer with timeouts
+	// create a channel to get notification when the reader has shutdown
 	readerDone := make(chan struct{})
-	writerDone := make(chan struct{})
+	c.reader = NewReader(c.ctx, c.conn, c.msgChan, c.errChan, readerDone, c.wg)
+	c.wg.Add(1)
+	go c.reader.Run()
 
-	go func() {
-		c.reader.Run(ctx)
-		close(readerDone)
-	}()
-
-	go func() {
-		c.writer.Run(ctx)
-		close(writerDone)
-	}()
-
-	// Wait for shutdown signal
-	select {
-	case <-ctx.Done():
-		c.logger.Debug("Context cancelled, initiating shutdown")
-	case <-c.shutdownChan:
-		c.logger.Debug("Shutdown requested")
+MainLoop:
+	for {
+		select {
+		case <-c.ctx.Done():
+			c.logger.Debug("Context cancelled, initiating shutdown")
+			break MainLoop
+		case err := <-c.errChan:
+			c.logger.Error("Error received from reader:", err)
+		}
 	}
 
 	// Perform graceful shutdown with timeout
@@ -124,21 +131,20 @@ func (c *WebSocketClient) Run(ctx context.Context) error {
 		c.logger.Error("Error during shutdown:", err)
 	}
 
-	// Wait for components with timeout
+	exitChan := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(exitChan)
+	}()
+
+	// Wait for reader and writer components with timeout
 	select {
 	case <-shutdownCtx.Done():
 		c.logger.Warn("Shutdown timeout reached")
 		return fmt.Errorf("shutdown timeout")
-	case <-readerDone:
-		c.logger.Debug("Reader shutdown complete")
-		select {
-		case <-shutdownCtx.Done():
-			return fmt.Errorf("writer shutdown timeout")
-		case <-writerDone:
-			c.logger.Debug("Writer shutdown complete")
-		}
+	case <-exitChan:
+		c.logger.Info("Reader and writer components shutdown complete")
 	}
-
 	return nil
 }
 
@@ -187,7 +193,7 @@ func (c *WebSocketClient) shutdown() error {
 
 // subscribeToOrderBook sends a subscription request for order book updates.
 // This will be implemented in the next iteration.
-func (c *WebSocketClient) subscribeToOrderBook() error {
+func (c *WebSocketClient) subscribeToOrderBook(msgChan chan []byte) error {
 	c.logger.Debug("Subscribing to order book")
 	// Create subscription message
 	sub := kraken.BookRequest{
@@ -209,6 +215,22 @@ func (c *WebSocketClient) subscribeToOrderBook() error {
 	// Send subscription request
 	c.writer.Write(msg)
 	c.logger.Info("Sent subscription request for:", c.tradingPair)
+
+	// wait for the subscription ACK message to be received
+	select {
+	case msg := <-msgChan:
+		var subAck kraken.BookResponse
+		if err := json.Unmarshal(msg, &subAck); err != nil {
+			return fmt.Errorf("error unmarshalling subscription ACK: %w", err)
+		}
+		if subAck.Success && subAck.Method == "subscribe" {
+			c.logger.Info("Received subscription ACK message:", string(msg))
+		} else {
+			return fmt.Errorf("subscription failed: %s", subAck.Error)
+		}
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("timeout waiting for subscription ACK message")
+	}
 
 	return nil
 }
