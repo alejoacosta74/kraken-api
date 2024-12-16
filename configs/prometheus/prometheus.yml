@@ -28,4 +28,4 @@ scrape_configs:
     static_configs:
       # Where the Prometheus server itself is running
       # This is the Prometheus server's IP address (192.168.5.142)
-      - targets: ['192.168.5.142:9090']
+      - targets: ['192.168.4.248:9090']

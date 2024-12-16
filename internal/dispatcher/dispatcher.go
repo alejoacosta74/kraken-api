@@ -165,11 +165,6 @@ func (d *Dispatcher) Run(ctx context.Context) {
 			return
 
 		case msg := <-d.msgChan:
-			// check if the context is done
-			if ctx.Err() != nil {
-				d.logger.Trace("Context cancelled, stopping dispatcher")
-				return
-			}
 			wg.Add(1)
 			go func(message []byte) {
 				defer wg.Done()

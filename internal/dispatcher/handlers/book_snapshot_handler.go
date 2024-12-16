@@ -32,11 +32,10 @@ func (h *BookSnapshotHandler) Handle(msg []byte) error {
 	// Log the snapshot
 	h.logger.Trace("Received book snapshot for:", snapshot.Data[0].Symbol)
 
-	//! Temporarily disabled
 	// Send to Kafka
-	// if err := h.producerPool.SendMessage(h.topicName, msg); err != nil {
-	// 	return fmt.Errorf("failed to send to kafka: %w", err)
-	// }
+	if err := h.producerPool.SendMessage(h.topicName, msg); err != nil {
+		return fmt.Errorf("failed to send to kafka: %w", err)
+	}
 	h.logger.Trace("Book snapshot sent to producer pool")
 
 	return nil

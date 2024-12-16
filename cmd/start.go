@@ -65,6 +65,14 @@ func runStart(cmd *cobra.Command, args []string) {
 	wsUrl := args[0]
 	pair := viper.GetString("tradingpair")
 
+	// Get Kafka brokers from viper
+	kafkaBrokers := viper.GetStringSlice("kafka.cluster.addresses")
+
+	// Check Kafka availability with a reasonable timeout
+	if err := kafka.CheckClusterAvailability(kafkaBrokers, 10*time.Second); err != nil {
+		logger.Fatalf("kafka cluster is not available: %v", err)
+	}
+
 	// Create cancellable context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
