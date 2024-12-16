@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -9,15 +10,20 @@ import (
 	"github.com/spf13/viper"
 )
 
+type MessageSender interface {
+	SendMessage(topic string, msg []byte) error
+}
+
+type PoolController interface {
+	Start()
+	Stop()
+}
+
 // ProducerPool defines the interface for a pool of Kafka producers.
 // It provides methods to start the pool, send messages, and gracefully stop.
 type ProducerPool interface {
-	// Start initializes and begins the worker pool operations
-	Start()
-	// SendMessage sends a message to a specified Kafka topic
-	SendMessage(topic string, msg []byte) error
-	// Stop gracefully shuts down the producer pool
-	Stop()
+	MessageSender
+	PoolController
 }
 
 // WorkerPool implements the ProducerPool interface.
@@ -30,6 +36,8 @@ type WorkerPool struct {
 	// msgChan is a buffered channel for distributing messages to workers
 	// Channel size = numWorkers * 10 to provide adequate buffering
 	msgChan chan producerMessage
+	// errChan is a channel for reporting errors from the workers
+	errChan chan error
 	// numWorkers specifies how many worker goroutines to spawn
 	numWorkers int
 	// wg tracks active workers for graceful shutdown
@@ -56,7 +64,7 @@ type producerMessage struct {
 //
 // Returns:
 //   - *WorkerPool: A configured but not yet started worker pool
-func NewProducerPool(ctx context.Context, numWorkers int) *WorkerPool {
+func NewProducerPool(ctx context.Context, numWorkers int, errChan chan error) *WorkerPool {
 	ctx, cancel := context.WithCancel(ctx)
 	msgChan := make(chan producerMessage, numWorkers*10)
 	pool := &WorkerPool{
@@ -67,6 +75,7 @@ func NewProducerPool(ctx context.Context, numWorkers int) *WorkerPool {
 		wg:         &sync.WaitGroup{},
 		logger:     logger.WithField("component", "kafka_producer_pool"),
 		workers:    make([]*Worker, numWorkers),
+		errChan:    errChan,
 	}
 
 	return pool
@@ -78,7 +87,7 @@ func (p *WorkerPool) Start() {
 	kafkaClusterAddresses := viper.GetStringSlice("kafka.cluster.addresses")
 	for i := 0; i < p.numWorkers; i++ {
 		p.wg.Add(1)
-		w := NewWorker(p.ctx, kafkaClusterAddresses, p.msgChan, p.wg)
+		w := NewWorker(p.ctx, kafkaClusterAddresses, p.msgChan, p.wg, p.errChan)
 		p.workers[i] = w
 		go w.Start(i)
 	}
@@ -100,6 +109,8 @@ func (p *WorkerPool) SendMessage(topic string, msg []byte) error {
 		return nil
 	case <-p.ctx.Done():
 		return p.ctx.Err()
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("timeout waiting for message to be sent")
 	}
 }
 

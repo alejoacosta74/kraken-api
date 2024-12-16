@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/alejoacosta74/go-logger"
+	"github.com/alejoacosta74/kraken-api/internal/common"
 	"github.com/alejoacosta74/kraken-api/internal/events"
 	"github.com/alejoacosta74/kraken-api/internal/kafka"
 	"github.com/alejoacosta74/kraken-api/pkg/kraken"
@@ -15,17 +16,6 @@ import (
 
 const (
 	KafkaProducerPoolSize = 3
-)
-
-// MessageType represents different types of messages that can be received from the WebSocket API
-type MessageType string
-
-// Predefined message types that can be received from the Kraken WebSocket API
-const (
-	TypeBookSnapshot MessageType = "book_snapshot" // Full order book snapshot
-	TypeBookUpdate   MessageType = "book_update"   // Incremental order book update
-	TypeHeartbeat    MessageType = "heartbeat"     // Keep-alive message
-	TypeSystem       MessageType = "system"        // System status messages
 )
 
 // MessageHandler defines the interface that all message handlers must implement.
@@ -39,7 +29,7 @@ type MessageHandler interface {
 // based on the message type.
 type Dispatcher struct {
 	// Map of message types to their handlers
-	handlers map[MessageType]MessageHandler
+	handlers map[common.MessageType]MessageHandler
 
 	// Event bus for publishing events to interested subscribers
 	eventBus events.Bus
@@ -63,6 +53,8 @@ type Dispatcher struct {
 	doneChan chan struct{} // Channel to signal when the dispatcher is done
 
 	producerPool kafka.ProducerPool
+
+	ctx context.Context
 }
 
 type DispatcherConfig struct {
@@ -85,13 +77,14 @@ type DispatcherConfig struct {
 //   - A configured Dispatcher instance ready to start processing messages
 func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	d := &Dispatcher{
-		handlers:     make(map[MessageType]MessageHandler),
+		handlers:     make(map[common.MessageType]MessageHandler),
 		eventBus:     cfg.EventBus,
 		logger:       logger.WithField("component", "dispatcher"),
 		msgChan:      cfg.MsgChan,
 		errChan:      cfg.ErrChan,
 		doneChan:     cfg.DoneChan,
 		producerPool: cfg.ProducerPool,
+		ctx:          cfg.Ctx,
 	}
 
 	return d
@@ -107,7 +100,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 // Usage example:
 //
 //	dispatcher.RegisterHandler(TypeBookSnapshot, NewBookSnapshotHandler())
-func (d *Dispatcher) RegisterHandler(msgType MessageType, handler MessageHandler) {
+func (d *Dispatcher) RegisterHandler(msgType common.MessageType, handler MessageHandler) {
 	d.logger.Debug("Registering handler for message type:", msgType)
 	d.handlerMutex.Lock()
 	defer d.handlerMutex.Unlock()
@@ -129,7 +122,7 @@ func (d *Dispatcher) RegisterHandler(msgType MessageType, handler MessageHandler
 //  2. Determine message type
 //  3. Route to appropriate handler
 //  4. Report any errors on errChan
-func (d *Dispatcher) Run(ctx context.Context) {
+func (d *Dispatcher) Run() {
 	d.logger.Info("Starting dispatcher")
 	defer func() {
 		close(d.errChan)
@@ -143,7 +136,7 @@ func (d *Dispatcher) Run(ctx context.Context) {
 	var wg sync.WaitGroup // WaitGroup for in-flight messages
 	for {
 		select {
-		case <-ctx.Done():
+		case <-d.ctx.Done():
 			d.logger.Trace("Context cancelled, waiting for in-flight messages to complete")
 			wg.Wait()
 			d.logger.Trace("All in-flight messages completed")
@@ -204,6 +197,12 @@ func (d *Dispatcher) dispatch(msg []byte) error {
 
 	// Determine message type
 	msgType := d.determineMessageType(genericMsg)
+
+	d.logger.WithFields(logger.Fields{
+		"msg_type": msgType,
+		"msg_size": len(msg),
+	}).Debug("About to handle message")
+
 	d.logger.Tracef("Message type: %s", msgType)
 	// Get handler for message type (thread-safe)
 	d.handlerMutex.RLock()
@@ -215,11 +214,27 @@ func (d *Dispatcher) dispatch(msg []byte) error {
 		return fmt.Errorf("no handler registered for message type: %s", msgType)
 	}
 	d.logger.Tracef("Handler found for message type: %s", msgType)
-	if err := handler.Handle(msg); err != nil {
-		d.errChan <- fmt.Errorf("handler error: %w", err)
-	} else {
-		d.eventBus.Publish(string(msgType), msg)
-		d.logger.Tracef("Event published: %s", string(msgType))
+	var err error
+	if err = handler.Handle(msg); err != nil {
+		select {
+		case <-d.ctx.Done():
+			d.logger.Trace("Context cancelled, not reporting error")
+		default:
+			d.errChan <- fmt.Errorf("handler error: %w", err)
+		}
+	}
+
+	if err == nil {
+		select {
+		case <-d.ctx.Done():
+			d.logger.Trace("Context cancelled, not publishing event to bus")
+		default:
+			d.eventBus.Publish(common.MessageType(msgType), msg)
+			d.logger.WithFields(logger.Fields{
+				"msg_type": msgType,
+				"msg_size": len(msg),
+			}).Trace("Published event to bus")
+		}
 	}
 
 	return nil
@@ -239,23 +254,27 @@ func (d *Dispatcher) dispatch(msg []byte) error {
 //   - Book update: channel="book" & type="update"
 //   - Heartbeat: channel="heartbeat"
 //   - System: channel="system"
-func (d *Dispatcher) determineMessageType(msg kraken.GenericResponse) MessageType {
+func (d *Dispatcher) determineMessageType(msg kraken.GenericResponse) common.MessageType {
 	// Add debug logging
 	d.logger.Debug("Received message - Channel:", msg.Channel, "Type:", msg.Type, "Method:", msg.Method)
 
+	messageType := common.MessageType("unknown")
+
 	switch {
 	case msg.Channel == "book" && msg.Type == "snapshot":
-		return TypeBookSnapshot
+		messageType = common.TypeBookSnapshot
 	case msg.Channel == "book" && msg.Type == "update":
-		return TypeBookUpdate
+		messageType = common.TypeBookUpdate
 	case msg.Channel == "heartbeat":
-		return TypeHeartbeat
+		messageType = common.TypeHeartbeat
 	case msg.Channel == "system":
-		return TypeSystem
+		messageType = common.TypeSystem
 	case msg.Method == "subscribe": // Add handling for subscription responses
 		return "subscription_response"
 	default:
 		d.logger.Debug("Unknown message type:", string(msg.Channel), msg.Type, msg.Method)
-		return MessageType("unknown")
+		return common.MessageType("unknown")
 	}
+
+	return messageType
 }

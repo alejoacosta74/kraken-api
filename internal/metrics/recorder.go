@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/alejoacosta74/go-logger"
+	"github.com/alejoacosta74/kraken-api/internal/common"
 	"github.com/alejoacosta74/kraken-api/internal/events"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // MetricsRecorder handles the collection and recording of metrics
@@ -120,6 +122,30 @@ func (r *MetricsRecorder) Start(ctx context.Context) error {
 	})
 	testGauge.Set(42.0)
 
+	// Add periodic metric value verification
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Get current metric values
+				snapshot := &dto.Metric{}
+				r.orderBookMetrics.snapshotsReceived.Write(snapshot)
+				r.logger.WithField("value", snapshot.Counter.GetValue()).
+					Info("Current snapshot count")
+
+				updates := &dto.Metric{}
+				r.orderBookMetrics.updatesReceived.Write(updates)
+				r.logger.WithField("value", updates.Counter.GetValue()).
+					Info("Current update count")
+			}
+		}
+	}()
+
 	// Subscribe to events and start recording
 	go r.recordMetrics(ctx)
 	return nil
@@ -127,23 +153,48 @@ func (r *MetricsRecorder) Start(ctx context.Context) error {
 
 // recordMetrics handles the actual metrics collection
 func (r *MetricsRecorder) recordMetrics(ctx context.Context) {
-	snapshots := r.eventBus.Subscribe("book_snapshot")
+	snapshots := r.eventBus.Subscribe(common.TypeBookSnapshot)
 
-	updates := r.eventBus.Subscribe("book_update")
+	updates := r.eventBus.Subscribe(common.TypeBookUpdate)
+
+	r.logger.Debug("Subscribed to channels")
+
+	// including for debugging metrics
+	snapshotCount := 0
+	updateCount := 0
 
 	for {
 		select {
 		case <-ctx.Done():
 			r.logger.Debug("Context cancelled, stopping metrics recorder")
-			r.eventBus.Unsubscribe("book_snapshot", snapshots)
-			r.eventBus.Unsubscribe("book_update", updates)
+			r.eventBus.Unsubscribe(common.TypeBookSnapshot, snapshots)
+			r.eventBus.Unsubscribe(common.TypeBookUpdate, updates)
 			return
-		case event := <-snapshots:
+		case event, ok := <-snapshots:
+			if !ok {
+				r.logger.Error("Snapshot channel closed unexpectedly")
+				return
+			}
+			snapshotCount++
+			// r.logger.WithFields("snapshot_count", snapshotCount).Trace("Received snapshot event")
+			r.logger.WithFields(logger.Fields{
+				"total_snapshots": snapshotCount,
+				"payload_size":    len(event.([]byte)),
+			}).Debug("Received snapshot event")
 			if msg, ok := event.([]byte); ok {
 				r.logger.Trace("Received snapshot event")
 				r.recordSnapshot(msg)
 			}
-		case event := <-updates:
+		case event, ok := <-updates:
+			if !ok {
+				r.logger.Error("Update channel closed unexpectedly")
+				return
+			}
+			updateCount++
+			r.logger.WithFields(logger.Fields{
+				"total_updates": updateCount,
+				"payload_size":  len(event.([]byte)),
+			}).Debug("Received update event")
 			if msg, ok := event.([]byte); ok {
 				r.logger.Trace("Received update event")
 				r.recordUpdate(msg)
@@ -158,6 +209,7 @@ func (r *MetricsRecorder) recordSnapshot(msg []byte) {
 
 	// Record basic metrics
 	r.orderBookMetrics.snapshotsReceived.Inc()
+	r.logger.WithField("total_snapshots", r.orderBookMetrics.snapshotsReceived).Debug("Incremented snapshot counter")
 	r.orderBookMetrics.snapshotSize.Observe(float64(len(msg)))
 	r.wsMetrics.messageReceived.WithLabelValues("snapshot").Inc()
 
@@ -176,11 +228,15 @@ func (r *MetricsRecorder) recordUpdate(msg []byte) {
 
 	// Record basic metrics
 	r.orderBookMetrics.updatesReceived.Inc()
+	r.logger.WithField("total_updates", r.orderBookMetrics.updatesReceived).Debug("Incremented update counter")
 	r.wsMetrics.messageReceived.WithLabelValues("update").Inc()
 	r.orderBookMetrics.snapshotSize.Observe(float64(len(msg)))
 
 	// Record processing latency
-	r.orderBookMetrics.processLatency.Observe(time.Since(start).Seconds())
+	latency := time.Since(start).Seconds()
+	r.orderBookMetrics.processLatency.Observe(latency)
+	r.logger.WithField("latency", latency).Debug("Recorded update latency")
+
 }
 
 // calculatePriceSpread parses a message and calculates the bid-ask spread

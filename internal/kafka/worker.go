@@ -18,6 +18,8 @@ type Worker struct {
 	producer *Producer
 	// msgChan receives messages to be sent to Kafka
 	msgChan <-chan producerMessage
+	// errChan is a channel for reporting errors from the worker
+	errChan chan error
 	// wg is used to signal when the worker has completed
 	wg *sync.WaitGroup
 	// logger for worker-specific logging
@@ -38,7 +40,7 @@ type Worker struct {
 //   - *Worker: A configured worker ready to start
 //
 // Panics if producer creation fails
-func NewWorker(ctx context.Context, kafkaClusterAddresses []string, msgChan <-chan producerMessage, wg *sync.WaitGroup) *Worker {
+func NewWorker(ctx context.Context, kafkaClusterAddresses []string, msgChan <-chan producerMessage, wg *sync.WaitGroup, errChan chan error) *Worker {
 	producer, err := NewProducer(kafkaClusterAddresses)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create producer: %v", err))
@@ -47,6 +49,7 @@ func NewWorker(ctx context.Context, kafkaClusterAddresses []string, msgChan <-ch
 		producer: producer,
 		msgChan:  msgChan,
 		wg:       wg,
+		errChan:  errChan,
 		logger:   logger.WithField("component", "kafka_producer_worker"),
 		ctx:      ctx,
 		done:     make(chan struct{}),
@@ -74,10 +77,11 @@ func (w *Worker) Start(id int) {
 				w.logger.Warnf("Message channel closed, stopping worker %d", w.id)
 				return
 			}
+			w.logger.WithField("worker_id", w.id).Tracef("Received message to send to Kafka cluster: %+v", msg)
 			// Create a timeout channel for the send operation
 			sendDone := make(chan error, 1)
 			go func() {
-				sendDone <- w.producer.SendMessage(msg.topic, msg.payload)
+				sendDone <- w.producer.SendToKafka(msg.topic, msg.payload)
 			}()
 
 			// Wait for either send completion or timeout
@@ -85,9 +89,11 @@ func (w *Worker) Start(id int) {
 			case err := <-sendDone:
 				if err != nil {
 					w.logger.Errorf("Failed to send message: %v", err)
+					w.errChan <- err
 				}
 			case <-time.After(2 * time.Second):
-				w.logger.Warn("Sending message to Kafka cluster timed out after 2 seconds")
+				w.logger.WithField("worker_id", w.id).Warnf("Sending message to Kafka cluster timed out after 2 seconds")
+				w.errChan <- fmt.Errorf("sending message to Kafka cluster timed out after 2 seconds. worker_id: %d", w.id)
 			}
 		}
 	}

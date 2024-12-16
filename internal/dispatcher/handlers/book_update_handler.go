@@ -27,7 +27,7 @@ func (h *BookUpdateHandler) Handle(msg []byte) error {
 	}
 
 	// Log the update
-	h.logger.Trace("Received book update for:", update.Data[0].Symbol)
+	h.logger.Tracef("Received book update for: %s", update.Data[0].Symbol)
 
 	// Send to producer pool
 	if err := h.producerPool.SendMessage(h.topicName, msg); err != nil {

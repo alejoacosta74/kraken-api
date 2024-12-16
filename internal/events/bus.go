@@ -4,16 +4,17 @@ import (
 	"sync"
 
 	"github.com/alejoacosta74/go-logger"
+	"github.com/alejoacosta74/kraken-api/internal/common"
 )
 
 // Bus defines the interface for event bus operations
 type Bus interface {
 	// Publish sends an event to all subscribers of the specified topic
-	Publish(topic string, event interface{})
+	Publish(topic common.MessageType, event interface{})
 	// Subscribe returns a channel that receives events for the specified topic
-	Subscribe(topic string) <-chan interface{}
+	Subscribe(topic common.MessageType) <-chan interface{}
 	// Unsubscribe removes a subscriber channel from the specified topic
-	Unsubscribe(topic string, ch <-chan interface{})
+	Unsubscribe(topic common.MessageType, ch <-chan interface{})
 }
 
 // EventBus implements the Bus interface providing a concurrent-safe
@@ -22,7 +23,7 @@ type EventBus struct {
 	// subscribers maps topics to a set of subscriber channels
 	// map[topic]map[chan<- interface{}]struct{} creates a set-like structure
 	// where the empty struct{} uses no additional memory
-	subscribers map[string]map[chan interface{}]struct{}
+	subscribers map[common.MessageType]map[chan interface{}]struct{}
 
 	// subscribersMu protects concurrent access to the subscribers map
 	// This mutex must be held when modifying the map or its contents
@@ -43,7 +44,7 @@ type EventBus struct {
 // The channelBufferSize parameter determines the buffer size for subscriber channels.
 func NewEventBus() *EventBus {
 	return &EventBus{
-		subscribers:       make(map[string]map[chan interface{}]struct{}),
+		subscribers:       make(map[common.MessageType]map[chan interface{}]struct{}),
 		channelBufferSize: 100, // Buffer up to 100 events per subscriber
 		shutdownCh:        make(chan struct{}),
 		logger:            logger.WithField("component", "event_bus"),
@@ -58,27 +59,40 @@ func NewEventBus() *EventBus {
 //   - event: The event data to send to subscribers
 //
 // If a subscriber's channel is full, the event will be dropped for that subscriber.
-func (b *EventBus) Publish(topic string, event interface{}) {
+func (b *EventBus) Publish(topic common.MessageType, event interface{}) {
 	b.subscribersMu.RLock()
 	defer b.subscribersMu.RUnlock()
 
 	// Get the subscriber channels for this topic
 	subscribers, exists := b.subscribers[topic]
+
+	b.logger.WithFields(logger.Fields{
+		"topic":             topic,
+		"subscribers_count": len(subscribers),
+	}).Trace("Publishing event") // Changed to WARN for visibility
+
 	if !exists {
 		b.logger.Trace("No subscribers for this topic")
 		return // No subscribers for this topic
 	}
-	b.logger.Tracef("Publishing received event length  to topic %s subscribers", topic)
 	// Send to each subscriber non-blocking
+	sentCount := 0
 	for subscriberCh := range subscribers {
 		select {
 		case subscriberCh <- event:
+			sentCount++
 			// Event sent successfully
 		default:
 			// Channel full, drop event for this subscriber
 			b.logger.Warn("Channel full, dropping event for this subscriber")
 		}
 	}
+
+	b.logger.WithFields(logger.Fields{
+		"topic":      topic,
+		"sent_count": sentCount,
+		"total_subs": len(subscribers),
+	}).Trace("Event publishing complete")
 }
 
 // Subscribe creates a new subscription to the specified topic.
@@ -92,7 +106,7 @@ func (b *EventBus) Publish(topic string, event interface{}) {
 //
 // The returned channel is buffered with size channelBufferSize.
 // The subscriber should always call Unsubscribe when done to prevent resource leaks.
-func (b *EventBus) Subscribe(topic string) <-chan interface{} {
+func (b *EventBus) Subscribe(topic common.MessageType) <-chan interface{} {
 	b.subscribersMu.Lock()
 	defer b.subscribersMu.Unlock()
 
@@ -106,7 +120,7 @@ func (b *EventBus) Subscribe(topic string) <-chan interface{} {
 
 	// Add the channel to the subscribers map
 	b.subscribers[topic][ch] = struct{}{}
-	b.logger.Debugf("Subscribed to topic %s", topic)
+	b.logger.Infof("Subscribed to topic %s", topic)
 	return ch
 }
 
@@ -121,7 +135,7 @@ func (b *EventBus) Subscribe(topic string) <-chan interface{} {
 //
 //	ch := eventBus.Subscribe("book_snapshot")
 //	defer eventBus.Unsubscribe("book_snapshot", ch)
-func (b *EventBus) Unsubscribe(topic string, ch <-chan interface{}) {
+func (b *EventBus) Unsubscribe(topic common.MessageType, ch <-chan interface{}) {
 	b.subscribersMu.Lock()
 	defer b.subscribersMu.Unlock()
 
@@ -171,7 +185,7 @@ func (b *EventBus) Shutdown() {
 
 // TopicSubscriberCount returns the number of subscribers for a topic.
 // This method is useful for testing and monitoring.
-func (b *EventBus) TopicSubscriberCount(topic string) int {
+func (b *EventBus) TopicSubscriberCount(topic common.MessageType) int {
 	b.subscribersMu.RLock()
 	defer b.subscribersMu.RUnlock()
 

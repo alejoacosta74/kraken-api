@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/alejoacosta74/go-logger"
+	"github.com/alejoacosta74/kraken-api/internal/common"
 	disp "github.com/alejoacosta74/kraken-api/internal/dispatcher"
 	"github.com/alejoacosta74/kraken-api/internal/dispatcher/handlers"
+
 	"github.com/alejoacosta74/kraken-api/internal/events"
 	"github.com/alejoacosta74/kraken-api/internal/kafka"
 	"github.com/alejoacosta74/kraken-api/internal/metrics"
@@ -91,7 +93,8 @@ func runStart(cmd *cobra.Command, args []string) {
 	metricsRecorder := metrics.NewMetricsRecorder(ctx, eventBus)
 
 	// create producer pool
-	producerPool := kafka.NewProducerPool(ctx, viper.GetInt("kafka.producer.pool.size"))
+	poolErrChan := make(chan error, 10)
+	producerPool := kafka.NewProducerPool(ctx, viper.GetInt("kafka.producer.pool.size"), poolErrChan)
 
 	// Create channels for WebSocket communication
 	msgChan := make(chan []byte, 100)
@@ -119,10 +122,10 @@ func runStart(cmd *cobra.Command, args []string) {
 	updateHandler := handlers.NewBookUpdateHandler(baseHandler)
 
 	// Register handlers with dispatcher
-	dispatcher.RegisterHandler(disp.TypeBookSnapshot, snapshotHandler)
-	dispatcher.RegisterHandler(disp.TypeBookUpdate, updateHandler)
-	dispatcher.RegisterHandler(disp.TypeHeartbeat, debugHandler)
-	dispatcher.RegisterHandler(disp.TypeSystem, debugHandler)
+	dispatcher.RegisterHandler(common.TypeBookSnapshot, snapshotHandler)
+	dispatcher.RegisterHandler(common.TypeBookUpdate, updateHandler)
+	dispatcher.RegisterHandler(common.TypeHeartbeat, debugHandler)
+	dispatcher.RegisterHandler(common.TypeSystem, debugHandler)
 	dispatcher.RegisterHandler("subscription_response", debugHandler)
 
 	// Create WebSocket client
@@ -175,7 +178,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		dispatcher.Run(ctx)
+		dispatcher.Run()
 		shutdownStatuses <- componentStatus{"dispatcher", nil}
 	}()
 
@@ -207,6 +210,11 @@ func runStart(cmd *cobra.Command, args []string) {
 					return
 				}
 				logger.Error("WebSocket client error:", err)
+			case err, ok := <-poolErrChan:
+				if !ok {
+					return
+				}
+				logger.Error("Producer pool error:", err)
 			}
 		}
 	}()
