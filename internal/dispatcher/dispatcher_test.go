@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alejoacosta74/go-logger"
+	"github.com/alejoacosta74/kraken-api/internal/common"
 	"github.com/alejoacosta74/kraken-api/internal/dispatcher/mocks"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -76,6 +77,9 @@ func TestDispatcher_Run(t *testing.T) {
 			errChan := make(chan error, 1)  // channel to receive errors
 			doneChan := make(chan struct{}) // channel to wait for dispatcher to finish
 
+			// Create context
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			// Create dispatcher config
 			cfg := DispatcherConfig{
 				MsgChan:      msgChan,
@@ -83,21 +87,18 @@ func TestDispatcher_Run(t *testing.T) {
 				DoneChan:     doneChan,
 				EventBus:     mockEventBus,
 				ProducerPool: mockProducerPool,
+				Ctx:          ctx,
 			}
 
 			// Create dispatcher and register handler
 			dispatcher := NewDispatcher(cfg)
-			dispatcher.RegisterHandler(TypeBookSnapshot, mockHandler)
+			dispatcher.RegisterHandler(common.TypeBookSnapshot, mockHandler)
 
 			// Setup mocks
 			tt.setupMockStubs()
 
-			// Create context
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
 			// Start dispatcher in goroutine
-			go dispatcher.Run(ctx)
+			go dispatcher.Run()
 
 			// Send test message
 			msgChan <- tt.message
@@ -153,7 +154,7 @@ func TestDispatcher_dispatch(t *testing.T) {
 		name           string
 		message        []byte
 		setupMockStubs func()
-		registerTypes  map[MessageType]MessageHandler
+		registerTypes  map[common.MessageType]MessageHandler
 		expectedError  string
 	}{
 		{
@@ -163,8 +164,8 @@ func TestDispatcher_dispatch(t *testing.T) {
 				mockHandler.EXPECT().Handle(gomock.Any()).Return(nil)
 				mockEventBus.EXPECT().Publish("book_snapshot", gomock.Any())
 			},
-			registerTypes: map[MessageType]MessageHandler{
-				TypeBookSnapshot: mockHandler,
+			registerTypes: map[common.MessageType]MessageHandler{
+				common.TypeBookSnapshot: mockHandler,
 			},
 			expectedError: "",
 		},
@@ -174,8 +175,8 @@ func TestDispatcher_dispatch(t *testing.T) {
 			setupMockStubs: func() {
 				// No mocks needed as it should fail before handler
 			},
-			registerTypes: map[MessageType]MessageHandler{
-				TypeBookSnapshot: mockHandler,
+			registerTypes: map[common.MessageType]MessageHandler{
+				common.TypeBookSnapshot: mockHandler,
 			},
 			expectedError: "failed to parse message",
 		},
@@ -185,7 +186,7 @@ func TestDispatcher_dispatch(t *testing.T) {
 			setupMockStubs: func() {
 				// No mocks needed as there's no handler
 			},
-			registerTypes: map[MessageType]MessageHandler{},
+			registerTypes: map[common.MessageType]MessageHandler{},
 			expectedError: "no handler registered for message type",
 		},
 		{
@@ -194,8 +195,8 @@ func TestDispatcher_dispatch(t *testing.T) {
 			setupMockStubs: func() {
 				mockHandler.EXPECT().Handle(gomock.Any()).Return(fmt.Errorf("handler error"))
 			},
-			registerTypes: map[MessageType]MessageHandler{
-				TypeBookSnapshot: mockHandler,
+			registerTypes: map[common.MessageType]MessageHandler{
+				common.TypeBookSnapshot: mockHandler,
 			},
 			expectedError: "handler error for message type book_snapshot",
 		},
@@ -226,7 +227,7 @@ func TestDispatcher_dispatch(t *testing.T) {
 			}
 
 			// Clear handlers for next test
-			d.handlers = make(map[MessageType]MessageHandler)
+			d.handlers = make(map[common.MessageType]MessageHandler)
 		})
 	}
 }

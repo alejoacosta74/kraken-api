@@ -7,6 +7,7 @@ package mocks
 import (
 	reflect "reflect"
 
+	common "github.com/alejoacosta74/kraken-api/internal/common"
 	gomock "github.com/golang/mock/gomock"
 )
 
@@ -34,7 +35,7 @@ func (m *MockBus) EXPECT() *MockBusMockRecorder {
 }
 
 // Publish mocks base method.
-func (m *MockBus) Publish(arg0 string, arg1 interface{}) {
+func (m *MockBus) Publish(arg0 common.MessageType, arg1 interface{}) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "Publish", arg0, arg1)
 }
@@ -46,7 +47,7 @@ func (mr *MockBusMockRecorder) Publish(arg0, arg1 interface{}) *gomock.Call {
 }
 
 // Subscribe mocks base method.
-func (m *MockBus) Subscribe(arg0 string) <-chan interface{} {
+func (m *MockBus) Subscribe(arg0 common.MessageType) <-chan interface{} {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Subscribe", arg0)
 	ret0, _ := ret[0].(<-chan interface{})
@@ -60,7 +61,7 @@ func (mr *MockBusMockRecorder) Subscribe(arg0 interface{}) *gomock.Call {
 }
 
 // Unsubscribe mocks base method.
-func (m *MockBus) Unsubscribe(arg0 string, arg1 <-chan interface{}) {
+func (m *MockBus) Unsubscribe(arg0 common.MessageType, arg1 <-chan interface{}) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "Unsubscribe", arg0, arg1)
 }

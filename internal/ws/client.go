@@ -103,7 +103,7 @@ func (c *WebSocketClient) Run() error {
 	go c.writer.Run()
 
 	// Subscribe to order book after connection is established
-	if err := c.subscribeToOrderBook(c.msgChan); err != nil {
+	if err := c.subscribeToOrderBook(); err != nil {
 		c.logger.Errorf("subscription failed: %v", err)
 		// stop the writer
 		close(writeStopChan)
@@ -209,7 +209,7 @@ func (c *WebSocketClient) shutdown() error {
 
 // subscribeToOrderBook sends a subscription request for order book updates.
 // This will be implemented in the next iteration.
-func (c *WebSocketClient) subscribeToOrderBook(msgChan chan []byte) error {
+func (c *WebSocketClient) subscribeToOrderBook() error {
 	c.logger.Info("Subscribing to order book")
 	// Create subscription message
 	sub := kraken.BookRequest{

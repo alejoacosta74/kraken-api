@@ -5,6 +5,7 @@
 package mocks
 
 import (
+	context "context"
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
@@ -33,24 +34,26 @@ func (m *MockProducerPool) EXPECT() *MockProducerPoolMockRecorder {
 	return m.recorder
 }
 
-// SendMessage mocks base method.
-func (m *MockProducerPool) SendMessage(arg0 string, arg1 []byte) error {
+// Send mocks base method.
+func (m *MockProducerPool) Send(arg0 context.Context, arg1 string, arg2 []byte) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SendMessage", arg0, arg1)
+	ret := m.ctrl.Call(m, "Send", arg0, arg1, arg2)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// SendMessage indicates an expected call of SendMessage.
-func (mr *MockProducerPoolMockRecorder) SendMessage(arg0, arg1 interface{}) *gomock.Call {
+// Send indicates an expected call of Send.
+func (mr *MockProducerPoolMockRecorder) Send(arg0, arg1, arg2 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendMessage", reflect.TypeOf((*MockProducerPool)(nil).SendMessage), arg0, arg1)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockProducerPool)(nil).Send), arg0, arg1, arg2)
 }
 
 // Start mocks base method.
-func (m *MockProducerPool) Start() {
+func (m *MockProducerPool) Start() error {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Start")
+	ret := m.ctrl.Call(m, "Start")
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // Start indicates an expected call of Start.
@@ -60,9 +63,11 @@ func (mr *MockProducerPoolMockRecorder) Start() *gomock.Call {
 }
 
 // Stop mocks base method.
-func (m *MockProducerPool) Stop() {
+func (m *MockProducerPool) Stop() error {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Stop")
+	ret := m.ctrl.Call(m, "Stop")
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // Stop indicates an expected call of Stop.
