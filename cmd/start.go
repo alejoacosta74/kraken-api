@@ -15,6 +15,7 @@ import (
 	disp "github.com/alejoacosta74/kraken-api/internal/dispatcher"
 	"github.com/alejoacosta74/kraken-api/internal/dispatcher/handlers"
 	"github.com/alejoacosta74/kraken-api/internal/events"
+	"github.com/alejoacosta74/kraken-api/internal/kafka"
 	"github.com/alejoacosta74/kraken-api/internal/metrics"
 	"github.com/alejoacosta74/kraken-api/internal/ws"
 	"github.com/spf13/cobra"
@@ -81,15 +82,28 @@ func runStart(cmd *cobra.Command, args []string) {
 	metricsServer := metrics.NewMetricsServer(viper.GetString("metrics.addr"))
 	metricsRecorder := metrics.NewMetricsRecorder(ctx, eventBus)
 
+	// create producer pool
+	producerPool := kafka.NewProducerPool(ctx, viper.GetInt("kafka.producer.pool.size"))
+
 	// Create channels for WebSocket communication
 	msgChan := make(chan []byte, 100)
 	dispatcherErrChan := make(chan error, 10)
+	dispatcherDoneChan := make(chan struct{})
+
+	dispatcherCfg := disp.DispatcherConfig{
+		Ctx:          ctx,
+		MsgChan:      msgChan,
+		ErrChan:      dispatcherErrChan,
+		DoneChan:     dispatcherDoneChan,
+		ProducerPool: producerPool,
+		EventBus:     eventBus,
+	}
 
 	// Create and configure dispatcher
-	dispatcher := disp.NewDispatcher(ctx, msgChan, dispatcherErrChan, eventBus)
+	dispatcher := disp.NewDispatcher(dispatcherCfg)
 
 	// Create base handler with producer pool
-	baseHandler := handlers.NewBaseHandler(dispatcher.GetProducerPool(), "kraken_book")
+	baseHandler := handlers.NewBaseHandler(ctx, producerPool, "kraken_book")
 
 	// Create handlers
 	debugHandler := handlers.NewDebugHandler()
@@ -119,13 +133,23 @@ func runStart(cmd *cobra.Command, args []string) {
 	// Start components with a single WaitGroup
 	var wg sync.WaitGroup
 
+	// Create channels for component-specific shutdown signals
+	type componentStatus struct {
+		name string
+		err  error
+	}
+
+	shutdownStatuses := make(chan componentStatus, 4) // Buffer for all components
+
 	// Start metrics server
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		if err := metricsServer.Start(ctx); err != nil {
+			shutdownStatuses <- componentStatus{"metrics_server", err}
 			logger.Error("Metrics server error:", err)
 		}
+		shutdownStatuses <- componentStatus{"metrics_server", nil}
 	}()
 
 	// Start metrics recorder
@@ -133,8 +157,10 @@ func runStart(cmd *cobra.Command, args []string) {
 	go func() {
 		defer wg.Done()
 		if err := metricsRecorder.Start(ctx); err != nil {
+			shutdownStatuses <- componentStatus{"metrics_recorder", err}
 			logger.Error("Metrics recorder error:", err)
 		}
+		shutdownStatuses <- componentStatus{"metrics_recorder", nil}
 	}()
 
 	// Start dispatcher
@@ -142,6 +168,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	go func() {
 		defer wg.Done()
 		dispatcher.Run(ctx)
+		shutdownStatuses <- componentStatus{"dispatcher", nil}
 	}()
 
 	// Start WebSocket client
@@ -149,9 +176,31 @@ func runStart(cmd *cobra.Command, args []string) {
 	go func() {
 		defer wg.Done()
 		if err := wsClient.Run(); err != nil {
+			shutdownStatuses <- componentStatus{"websocket_client", err}
 			logger.Fatalf("WebSocket client error: %v", err)
+			cancel() // Trigger shutdown if WebSocket fails
+			return
 		}
 		<-wsDoneChan
+		shutdownStatuses <- componentStatus{"websocket_client", nil}
+	}()
+
+	// go routine to log all the errors received from the error channels
+	go func() {
+		for {
+			select {
+			case err, ok := <-dispatcherErrChan:
+				if !ok {
+					return
+				}
+				logger.Error("Dispatcher error:", err)
+			case err, ok := <-wsErrChan:
+				if !ok {
+					return
+				}
+				logger.Error("WebSocket client error:", err)
+			}
+		}
 	}()
 
 	// Wait for context cancellation
@@ -162,30 +211,43 @@ func runStart(cmd *cobra.Command, args []string) {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer shutdownCancel()
 
-	// Create channels to track individual component shutdown
-	dispatcherDone := make(chan struct{})
-	// metricsDone := make(chan struct{})
-	// wsClientDone := make(chan struct{})
-
-	// Wait for dispatcher with timeout
+	// Create a channel to signal when all components are done
+	allDone := make(chan struct{})
 	go func() {
 		wg.Wait()
-		close(dispatcherDone)
+		close(allDone)
 	}()
 
-	// Wait for each component with individual timeouts
-	select {
-	case <-dispatcherDone:
-		logger.Info("All components shut down cleanly")
-	case <-shutdownCtx.Done():
-		logger.Error("Shutdown timeout - checking individual components")
-		// Log which components are still running
+	// Track shutdown status of components
+	componentStatuses := make(map[string]error)
+	componentsRunning := 4 // Number of components we're waiting for
+
+	// Wait for either all components to shut down or timeout
+	for {
 		select {
-		case <-dispatcherDone:
-			logger.Info("Dispatcher shut down")
-		default:
-			logger.Error("Dispatcher failed to shut down")
+		case status := <-shutdownStatuses:
+			componentStatuses[status.name] = status.err
+			componentsRunning--
+			logger.Infof("Component %s shutdown complete", status.name)
+			if componentsRunning == 0 {
+				logger.Info("All components shut down successfully")
+				return
+			}
+
+		case <-allDone:
+			logger.Info("All components shut down cleanly")
+			return
+
+		case <-shutdownCtx.Done():
+			logger.Error("Shutdown timeout reached - forcing exit")
+			// Log status of components that haven't shut down
+			for _, component := range []string{"metrics_server", "metrics_recorder", "dispatcher", "websocket_client"} {
+				if _, ok := componentStatuses[component]; !ok {
+					logger.Errorf("Component %s failed to shut down in time", component)
+				}
+			}
+			// Force exit after logging
+			os.Exit(1)
 		}
-		// ... similar checks for other components
 	}
 }

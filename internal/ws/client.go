@@ -93,6 +93,12 @@ func (c *WebSocketClient) Run() error {
 	writeStopChan := make(chan struct{})
 	c.writer = NewWriter(c.ctx, c.conn, c.errChan, writerDoneChan, writeStopChan, c.wg)
 
+	// check Kraken API status
+	if err := c.checkKrakenAPIStatus(); err != nil {
+		c.logger.Errorf("Kraken API status check failed: %v", err)
+		return fmt.Errorf("Kraken API status check failed: %w", err)
+	}
+
 	c.wg.Add(1)
 	go c.writer.Run()
 
@@ -204,7 +210,7 @@ func (c *WebSocketClient) shutdown() error {
 // subscribeToOrderBook sends a subscription request for order book updates.
 // This will be implemented in the next iteration.
 func (c *WebSocketClient) subscribeToOrderBook(msgChan chan []byte) error {
-	c.logger.Debug("Subscribing to order book")
+	c.logger.Info("Subscribing to order book")
 	// Create subscription message
 	sub := kraken.BookRequest{
 		Method: "subscribe",
@@ -226,12 +232,56 @@ func (c *WebSocketClient) subscribeToOrderBook(msgChan chan []byte) error {
 	c.writer.Write(msg)
 	c.logger.Info("Sent subscription request for:", c.tradingPair)
 
-	// wait for the subscription ACK message to be received
+	// read next message
+	msg, err = c.readNextMessage()
+	if err != nil {
+		return fmt.Errorf("error reading message: %w", err)
+	}
+	c.logger.Tracef("Received message: %s", msg)
+	var subAck kraken.BookResponse
+	if err := json.Unmarshal(msg, &subAck); err != nil {
+		return fmt.Errorf("error unmarshalling subscription ACK: %w", err)
+	}
+	if subAck.Success && subAck.Method == "subscribe" {
+		c.logger.Info("Received subscription ACK message")
+	} else {
+		return fmt.Errorf("subscription failed: %s", subAck.Error)
+	}
+
+	return nil
+}
+
+// checkKrakenAPIStatus checks the status of the Kraken API
+// by waiting for a StatusMessage and API data
+func (c *WebSocketClient) checkKrakenAPIStatus() error {
+	c.logger.Info("Checking Kraken API status")
+	msg, err := c.readNextMessage()
+	if err != nil {
+		return fmt.Errorf("error reading message: %w", err)
+	}
+
+	c.logger.Tracef("Received message: %s", msg)
+	var status kraken.StatusMessage
+	if err := json.Unmarshal(msg, &status); err != nil {
+		return fmt.Errorf("error unmarshalling subscription ACK: %w", err)
+	}
+	if status.Type == "update" && status.Channel == "status" {
+		// TODO: verify API version, connection ID, system status, and version
+		c.logger.Info("Received status message OK")
+	} else {
+		return fmt.Errorf("invalid status message: %s", string(msg))
+	}
+	return nil
+}
+
+// readNextMessage reads the next message from the WebSocket connection
+// and returns it as a byte slice
+func (c *WebSocketClient) readNextMessage() ([]byte, error) {
 	readerChan := make(chan []byte)
 	go func() {
 		c.connMutex.Lock()
 		defer c.connMutex.Unlock()
-		_, msg, err = c.conn.ReadMessage()
+		_, msg, err := c.conn.ReadMessage()
 		if err != nil {
 			c.logger.Error("Error reading message:", err)
 			return
@@ -241,19 +291,8 @@ func (c *WebSocketClient) subscribeToOrderBook(msgChan chan []byte) error {
 
 	select {
 	case msg := <-readerChan:
-		c.logger.Tracef("Received message: %s", msg)
-		var subAck kraken.BookResponse
-		if err := json.Unmarshal(msg, &subAck); err != nil {
-			return fmt.Errorf("error unmarshalling subscription ACK: %w", err)
-		}
-		if subAck.Success && subAck.Method == "subscribe" {
-			c.logger.Info("Received subscription ACK message:", string(msg))
-		} else {
-			return fmt.Errorf("subscription failed: %s", subAck.Error)
-		}
+		return msg, nil
 	case <-time.After(5 * time.Second):
-		return fmt.Errorf("timeout waiting for subscription ACK message")
+		return nil, fmt.Errorf("timeout waiting for message")
 	}
-
-	return nil
 }

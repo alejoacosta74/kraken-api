@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 
@@ -22,7 +21,7 @@ func NewDebugHandler() *DebugHandler {
 }
 
 // Handle prints the message in a pretty format
-func (h *DebugHandler) Handle(ctx context.Context, msg []byte) error {
+func (h *DebugHandler) Handle(msg []byte) error {
 	// Pretty print JSON
 	var prettyJSON bytes.Buffer
 	if err := json.Indent(&prettyJSON, msg, "", "    "); err != nil {

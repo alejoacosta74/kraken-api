@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alejoacosta74/kraken-api/internal/ws/test"
+	"github.com/alejoacosta74/kraken-api/internal/ws/mocks"
 	"github.com/alejoacosta74/kraken-api/pkg/kraken"
 )
 
@@ -18,7 +18,7 @@ func TestWebSocketClientWriterReader(t *testing.T) {
 		name           string
 		tradingPair    string
 		messagesToSend []byte
-		setupHandler   func(mockServer *test.MockWebSocketServer)
+		setupHandler   func(mockServer *mocks.MockWebSocketServer)
 		wantErr        bool
 		expectedErr    string
 	}{
@@ -26,7 +26,7 @@ func TestWebSocketClientWriterReader(t *testing.T) {
 			name:           "BTC/USD succesfull subscription",
 			tradingPair:    "BTC/USD",
 			messagesToSend: nil,
-			setupHandler: func(mockServer *test.MockWebSocketServer) {
+			setupHandler: func(mockServer *mocks.MockWebSocketServer) {
 				mockServer.RegisterHandler("subscribe", func(msg []byte) interface{} {
 					return kraken.BookResponse{
 						Method:  "subscribe",
@@ -48,7 +48,7 @@ func TestWebSocketClientWriterReader(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create mock server
-			mockServer := test.NewMockWebSocketServer()
+			mockServer := mocks.NewMockWebSocketServer()
 			defer mockServer.Close()
 
 			if tc.setupHandler != nil {
@@ -114,7 +114,7 @@ func TestWebSocketClientWriterReader(t *testing.T) {
 
 func TestWebSocketClientGracefulShutdown(t *testing.T) {
 	// Create mock server
-	mockServer := test.NewMockWebSocketServer()
+	mockServer := mocks.NewMockWebSocketServer()
 	defer mockServer.Close()
 
 	// Setup success handler for subscription

@@ -29,10 +29,11 @@ func (h *BookUpdateHandler) Handle(msg []byte) error {
 	// Log the update
 	h.logger.Trace("Received book update for:", update.Data[0].Symbol)
 
+	//! Temporarily disabled
 	// Send to Kafka
-	if err := h.producerPool.SendMessage(h.topicName, msg); err != nil {
-		return fmt.Errorf("failed to send to kafka: %w", err)
-	}
+	// if err := h.producerPool.SendMessage(h.topicName, msg); err != nil {
+	// 	return fmt.Errorf("failed to send to kafka: %w", err)
+	// }
 	h.logger.Trace("Book update sent to Kafka")
 
 	return nil

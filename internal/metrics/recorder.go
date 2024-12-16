@@ -130,16 +130,6 @@ func (r *MetricsRecorder) recordMetrics(ctx context.Context) {
 	snapshots := r.eventBus.Subscribe("book_snapshot")
 
 	updates := r.eventBus.Subscribe("book_update")
-	defer func() {
-		if rec := recover(); rec != nil {
-			r.logger.Errorf("Panic in recordMetrics: %v", rec)
-			// Only unsubscribe if we're actually shutting down
-			if ctx.Err() != nil {
-				r.eventBus.Unsubscribe("book_snapshot", snapshots)
-				r.eventBus.Unsubscribe("book_update", updates)
-			}
-		}
-	}()
 
 	for {
 		select {

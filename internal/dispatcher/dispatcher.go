@@ -60,7 +60,18 @@ type Dispatcher struct {
 	// Mutex for thread-safe access to the handlers map
 	handlerMutex sync.RWMutex
 
+	doneChan chan struct{} // Channel to signal when the dispatcher is done
+
 	producerPool kafka.ProducerPool
+}
+
+type DispatcherConfig struct {
+	Ctx          context.Context
+	MsgChan      chan []byte
+	ErrChan      chan error
+	DoneChan     chan struct{}
+	EventBus     events.Bus
+	ProducerPool kafka.ProducerPool
 }
 
 // NewDispatcher creates and initializes a new message dispatcher.
@@ -72,15 +83,15 @@ type Dispatcher struct {
 //
 // Returns:
 //   - A configured Dispatcher instance ready to start processing messages
-func NewDispatcher(ctx context.Context, msgChan chan []byte, errChan chan error, eventBus events.Bus) *Dispatcher {
-	producerPool := kafka.NewProducerPool(ctx, KafkaProducerPoolSize)
+func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	d := &Dispatcher{
 		handlers:     make(map[MessageType]MessageHandler),
-		eventBus:     eventBus,
+		eventBus:     cfg.EventBus,
 		logger:       logger.WithField("component", "dispatcher"),
-		msgChan:      msgChan,
-		errChan:      errChan,
-		producerPool: producerPool,
+		msgChan:      cfg.MsgChan,
+		errChan:      cfg.ErrChan,
+		doneChan:     cfg.DoneChan,
+		producerPool: cfg.ProducerPool,
 	}
 
 	return d
@@ -120,41 +131,49 @@ func (d *Dispatcher) RegisterHandler(msgType MessageType, handler MessageHandler
 //  4. Report any errors on errChan
 func (d *Dispatcher) Run(ctx context.Context) {
 	d.logger.Info("Starting dispatcher")
-	defer d.logger.Info("Dispatcher shutdown complete")
+	defer func() {
+		close(d.errChan)
+		close(d.doneChan)
+	}()
 
 	// Start the producer pool
 	d.producerPool.Start()
 	d.logger.Debug("Producer pool started")
 
-	var wg sync.WaitGroup
+	var wg sync.WaitGroup // WaitGroup for in-flight messages
 	for {
 		select {
 		case <-ctx.Done():
 			d.logger.Trace("Context cancelled, waiting for in-flight messages to complete")
 			wg.Wait()
 			d.logger.Trace("All in-flight messages completed")
-			// Create a timeout channel for producer pool shutdown
-			timeout := time.After(12 * time.Second)
-			done := make(chan struct{})
+			// Stop the producer pool
+			poolDoneChan := make(chan struct{})
 			d.logger.Trace("Stopping producer pool")
 			go func() {
 				d.producerPool.Stop()
-				close(done)
+				close(poolDoneChan)
 			}()
 
 			select {
-			case <-done:
+			case <-poolDoneChan:
 				d.logger.Trace("Producer pool stopped successfully")
-			case <-timeout:
+			case <-time.After(2 * time.Second):
 				d.logger.Error("Timeout waiting for producer pool to stop")
+				d.errChan <- fmt.Errorf("timeout waiting for producer pool to stop")
 			}
 			return
 
 		case msg := <-d.msgChan:
+			// check if the context is done
+			if ctx.Err() != nil {
+				d.logger.Trace("Context cancelled, stopping dispatcher")
+				return
+			}
 			wg.Add(1)
-			go func(msg []byte) {
+			go func(message []byte) {
 				defer wg.Done()
-				if err := d.dispatch(ctx, msg); err != nil {
+				if err := d.dispatch(message); err != nil {
 					d.errChan <- fmt.Errorf("dispatch error: %w", err)
 				}
 			}(msg)
@@ -201,15 +220,12 @@ func (d *Dispatcher) dispatch(msg []byte) error {
 		return fmt.Errorf("no handler registered for message type: %s", msgType)
 	}
 	d.logger.Tracef("Handler found for message type: %s", msgType)
-	// Handle the message
 	if err := handler.Handle(msg); err != nil {
-		return fmt.Errorf("handler error for message type %s: %w", msgType, err)
+		d.errChan <- fmt.Errorf("handler error: %w", err)
+	} else {
+		d.eventBus.Publish(string(msgType), msg)
+		d.logger.Tracef("Event published: %s", string(msgType))
 	}
-
-	// Publish event about message processing
-	// This is now clearly the dispatcher's responsibility
-	d.eventBus.Publish(string(msgType), msg)
-	d.logger.Tracef("Event published: %s", string(msgType))
 
 	return nil
 }
@@ -247,9 +263,4 @@ func (d *Dispatcher) determineMessageType(msg kraken.GenericResponse) MessageTyp
 		d.logger.Debug("Unknown message type:", string(msg.Channel), msg.Type, msg.Method)
 		return MessageType("unknown")
 	}
-}
-
-// GetProducerPool returns the dispatcher's producer pool
-func (d *Dispatcher) GetProducerPool() kafka.ProducerPool {
-	return d.producerPool
 }

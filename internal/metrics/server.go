@@ -19,7 +19,9 @@ type MetricsServer struct {
 
 func NewMetricsServer(addr string) *MetricsServer {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{
+		EnableOpenMetrics: true,
+	}))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -71,8 +73,4 @@ func (s *MetricsServer) Start(ctx context.Context) error {
 	}
 	s.logger.Info("Metrics server shutdown complete")
 	return nil
-}
-
-func (s *MetricsServer) Done() <-chan struct{} {
-	return s.done
 }

@@ -15,7 +15,7 @@ type ProducerPool interface {
 	// Start initializes and begins the worker pool operations
 	Start()
 	// SendMessage sends a message to a specified Kafka topic
-	SendMessage(ctx context.Context, topic string, msg []byte) error
+	SendMessage(topic string, msg []byte) error
 	// Stop gracefully shuts down the producer pool
 	Stop()
 }
