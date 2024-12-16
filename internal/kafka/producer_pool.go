@@ -7,142 +7,241 @@ import (
 	"time"
 
 	"github.com/alejoacosta74/go-logger"
-	"github.com/spf13/viper"
+	"github.com/alejoacosta74/kraken-api/internal/metrics"
 )
 
-type MessageSender interface {
-	SendMessage(topic string, msg []byte) error
+// Message represents a message to be sent to Kafka
+type Message struct {
+	Topic   string
+	Payload []byte
+	Headers map[string]string
 }
 
-type PoolController interface {
-	Start()
-	Stop()
+// ProducerConfig holds configuration for the producer pool
+type ProducerConfig struct {
+	BrokerList []string // List of Kafka brokers (i.e. ["localhost:9092"])
+	PoolSize   int      // Number of producers in the pool
+	// Ctx        context.Context
+	// Cancel     context.CancelFunc
+	Metrics *metrics.MetricsRecorder
+	ErrChan chan error // channel to send errors
 }
 
-// ProducerPool defines the interface for a pool of Kafka producers.
-// It provides methods to start the pool, send messages, and gracefully stop.
-type ProducerPool interface {
-	MessageSender
-	PoolController
+// producerPool manages a pool of KafkaProducers
+type producerPool struct {
+	producers chan KafkaProducer // Channel to hold producers (KafkaProducer interface)
+	config    ProducerConfig
+	logger    *logger.Logger
+	wg        sync.WaitGroup
+	ctx       context.Context    // Controls pool lifecycle
+	cancel    context.CancelFunc // For shutting down the pool
+	started   bool               // Track if pool has been started
+	mu        sync.RWMutex       // Protects started flag
+	metrics   *metrics.MetricsRecorder
+	errChan   chan error // channel to send errors
 }
 
-// WorkerPool implements the ProducerPool interface.
-// It manages a collection of workers that handle message production to Kafka.
-type WorkerPool struct {
-	// ctx is used for coordinating shutdown across the pool
-	ctx context.Context
-	// cancel is used to signal workers to stop
-	cancel context.CancelFunc
-	// msgChan is a buffered channel for distributing messages to workers
-	// Channel size = numWorkers * 10 to provide adequate buffering
-	msgChan chan producerMessage
-	// errChan is a channel for reporting errors from the workers
-	errChan chan error
-	// numWorkers specifies how many worker goroutines to spawn
-	numWorkers int
-	// wg tracks active workers for graceful shutdown
-	wg *sync.WaitGroup
-	// logger for pool-specific logging
-	logger  *logger.Logger
-	workers []*Worker
-}
-
-// producerMessage represents a message to be sent to Kafka.
-// It combines the destination topic with the message payload.
-type producerMessage struct {
-	// topic is the Kafka topic to publish to
-	topic string
-	// payload is the raw message data
-	payload []byte
-}
-
-// NewProducerPool creates and initializes a new WorkerPool.
-//
-// Parameters:
-//   - ctx: Context for lifecycle management
-//   - numWorkers: Number of worker goroutines to spawn
-//
-// Returns:
-//   - *WorkerPool: A configured but not yet started worker pool
-func NewProducerPool(ctx context.Context, numWorkers int, errChan chan error) *WorkerPool {
-	ctx, cancel := context.WithCancel(ctx)
-	msgChan := make(chan producerMessage, numWorkers*10)
-	pool := &WorkerPool{
-		ctx:        ctx,
-		cancel:     cancel,
-		msgChan:    msgChan,
-		numWorkers: numWorkers,
-		wg:         &sync.WaitGroup{},
-		logger:     logger.WithField("component", "kafka_producer_pool"),
-		workers:    make([]*Worker, numWorkers),
-		errChan:    errChan,
+// NewProducerPool creates a new pool of Kafka producers
+func NewProducerPool(config ProducerConfig) (*producerPool, error) {
+	if config.PoolSize <= 0 {
+		return nil, fmt.Errorf("pool size must be greater than 0")
 	}
 
-	return pool
-}
+	ctx, cancel := context.WithCancel(context.Background())
 
-// Start initializes the worker pool by creating the specified number of workers
-// and starting them. Each worker maintains its own Kafka producer connection.
-func (p *WorkerPool) Start() {
-	kafkaClusterAddresses := viper.GetStringSlice("kafka.cluster.addresses")
-	for i := 0; i < p.numWorkers; i++ {
-		p.wg.Add(1)
-		w := NewWorker(p.ctx, kafkaClusterAddresses, p.msgChan, p.wg, p.errChan)
-		p.workers[i] = w
-		go w.Start(i)
+	pool := &producerPool{
+		producers: make(chan KafkaProducer, config.PoolSize),
+		config:    config,
+		logger:    logger.WithField("component", "kafka_producer_pool"),
+		ctx:       ctx,
+		cancel:    cancel,
+		metrics:   config.Metrics,
+		errChan:   make(chan error, 10),
 	}
+
+	return pool, nil
 }
 
-// SendMessage queues a message for delivery to Kafka.
-// It implements the ProducerPool interface.
-//
-// Parameters:
-//   - ctx: Context for cancellation
-//   - topic: Destination Kafka topic
-//   - msg: Message payload
-//
-// Returns:
-//   - error: nil on success, ctx.Err() if context is cancelled
-func (p *WorkerPool) SendMessage(topic string, msg []byte) error {
-	select {
-	case p.msgChan <- producerMessage{topic: topic, payload: msg}:
-		return nil
-	case <-p.ctx.Done():
-		return p.ctx.Err()
-	case <-time.After(3 * time.Second):
-		return fmt.Errorf("timeout waiting for message to be sent")
+// Start initializes the producer pool and creates all producers
+func (p *producerPool) Start() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.started {
+		return fmt.Errorf("producer pool already started")
 	}
+
+	// Initialize the producer pool
+	for i := 0; i < p.config.PoolSize; i++ {
+		producer, err := newSaramaProducer(p.config)
+		if err != nil {
+			// Clean up any producers already created
+			p.Stop()
+			return fmt.Errorf("failed to create producer %d: %w", i, err)
+		}
+		p.producers <- producer
+	}
+
+	p.started = true
+	p.logger.Info("Producer pool started successfully")
+	return nil
 }
 
-// Stop initiates a graceful shutdown of the worker pool.
-// It closes the message channel and waits for all workers to complete.
-//
-// Returns:
-func (p *WorkerPool) Stop() {
-	p.logger.Info("Stopping producer pool")
-	close(p.msgChan)
+// Stop gracefully shuts down the producer pool
+func (p *producerPool) Stop() error {
+	p.mu.Lock()
+	if !p.started {
+		p.mu.Unlock()
+		return fmt.Errorf("producer pool not started")
+	}
+	p.mu.Unlock()
 
-	// Wait with timeout for each worker
-	timeout := time.After(10 * time.Second)
+	p.logger.Info("Stopping producer pool...")
+
+	// Signal shutdown
+	p.cancel()
+
+	// Create a timeout for shutdown
+	shutdownTimeout := time.After(10 * time.Second)
+
+	// Create a channel to signal completion of cleanup
 	done := make(chan struct{})
 
 	go func() {
-		for _, worker := range p.workers {
+		// Close all producers
+		var closeErr error
+		for i := 0; i < cap(p.producers); i++ {
 			select {
-			case <-worker.wait():
-				p.logger.Debugf("Worker %d stopped successfully", worker.id)
-			case <-timeout:
-				p.logger.Errorf("Timeout waiting for worker %d", worker.id)
-				return
+			case producer := <-p.producers:
+				if err := producer.Close(); err != nil {
+					p.logger.WithError(err).Error("Failed to close producer")
+					closeErr = err
+				}
+			case <-time.After(1 * time.Second):
+				p.logger.Warn("Timeout waiting for producer to be available for closing")
 			}
 		}
+
+		// Close the producers channel
+		close(p.producers)
+
+		p.mu.Lock()
+		p.started = false
+		p.mu.Unlock()
+
+		if closeErr != nil {
+			p.logger.WithError(closeErr).Error("Errors occurred while closing producers")
+		}
+
 		close(done)
 	}()
 
+	// Wait for cleanup to complete or timeout
 	select {
 	case <-done:
-		p.logger.Info("All workers finished successfully")
-	case <-timeout:
-		p.logger.Error("Timeout waiting for workers to finish")
+		p.logger.Info("Producer pool stopped successfully")
+		return nil
+	case <-shutdownTimeout:
+		return fmt.Errorf("timeout while stopping producer pool")
 	}
+}
+
+// Send sends a message to Kafka using an available producer from the pool.
+// It implements the MessageSender interface.
+//
+// The method:
+// 1. Acquires a producer from the pool channel
+// 2. Ensures the producer is returned to the pool using defer
+// 3. Sets a timeout context for the send operation
+// 4. Sends the message using the producer
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts
+//   - msg: Message containing topic, payload and headers to send
+//
+// Returns:
+//   - error: If context is cancelled, pool timeout occurs, or send fails
+//
+// Thread Safety:
+// - Safe for concurrent use by multiple goroutines
+// - Producers are safely managed via channel operations
+//
+// Timeouts:
+// - 3 second timeout waiting for available producer
+// - 5 second timeout for the actual send operation
+func (p *producerPool) Send(ctx context.Context, topic string, rawMsg []byte) error {
+	start := time.Now()
+
+	// update kafka queue size
+	p.metrics.UpdateKafkaQueueSize(float64(len(p.producers)))
+
+	msg := Message{
+		Topic:   topic,
+		Payload: rawMsg,
+	}
+
+	p.wg.Add(1)
+	defer p.wg.Done()
+
+	select {
+	case producer := <-p.producers:
+		defer func() {
+			select {
+			case <-p.ctx.Done():
+				// Pool is shutting down
+				producer.Close()
+			default:
+				p.producers <- producer
+			}
+		}()
+
+		// Use a separate context for the send operation
+		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		if err := producer.Send(sendCtx, msg); err != nil {
+			p.errChan <- err
+			p.metrics.RecordKafkaError(err.Error())
+			return fmt.Errorf("failed to send message: %w", err)
+		}
+
+		duration := time.Since(start)
+		p.metrics.RecordKafkaMessageSent(msg.Topic, duration)
+		return nil
+
+	case <-ctx.Done():
+		p.metrics.RecordKafkaError("context_cancelled")
+		return fmt.Errorf("operation cancelled by caller: %w", ctx.Err())
+
+	case <-p.ctx.Done():
+		p.metrics.RecordKafkaError("producer_pool_shutdown")
+		return fmt.Errorf("producer pool is shutting down")
+	}
+}
+
+// Close gracefully shuts down all producers in the pool by:
+// 1. Retrieving each producer from the pool channel
+// 2. Closing each producer's connection to Kafka
+// 3. Closing the producers channel
+//
+// If any producer fails to close cleanly, the error is logged and returned,
+// but the method continues closing remaining producers.
+//
+// Thread Safety:
+// - Safe to call concurrently with Send()
+// - Should only be called once during shutdown
+//
+// Returns:
+// - error: The first error encountered while closing producers, if any
+func (p *producerPool) Close() error {
+	var closeErr error
+	for i := 0; i < cap(p.producers); i++ {
+		producer := <-p.producers
+		if err := producer.Close(); err != nil {
+			closeErr = err
+			p.logger.WithError(err).Error("Failed to close producer")
+		}
+	}
+	close(p.producers)
+	return closeErr
 }

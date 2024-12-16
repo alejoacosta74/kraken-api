@@ -45,11 +45,14 @@ func init() {
 	startCmd.Flags().Int("metrics-buffer", 100, "Buffer size for metrics channels")
 	// Add kafka configuration flags
 	startCmd.Flags().StringSlice("kafka-cluster-addresses", []string{"192.168.4.248:9092"}, "Kafka cluster addresses")
+	// Add kafka producer pool size flag
+	startCmd.Flags().Int("kafka-producer-pool-size", 5, "Kafka producer pool size")
 	// Bind all flags to viper
 	viper.BindPFlag("tradingpair", startCmd.Flags().Lookup("pair"))
 	viper.BindPFlag("metrics.addr", startCmd.Flags().Lookup("metrics-addr"))
 	viper.BindPFlag("metrics.buffer", startCmd.Flags().Lookup("metrics-buffer"))
 	viper.BindPFlag("kafka.cluster.addresses", startCmd.Flags().Lookup("kafka-cluster-addresses"))
+	viper.BindPFlag("kafka.producer.pool.size", startCmd.Flags().Lookup("kafka-producer-pool-size"))
 }
 
 // runStart is the main entry point for the WebSocket client application.
@@ -94,7 +97,15 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	// create producer pool
 	poolErrChan := make(chan error, 10)
-	producerPool := kafka.NewProducerPool(ctx, viper.GetInt("kafka.producer.pool.size"), poolErrChan)
+	producerPool, err := kafka.NewProducerPool(kafka.ProducerConfig{
+		BrokerList: kafkaBrokers,
+		PoolSize:   viper.GetInt("kafka.producer.pool.size"),
+		Metrics:    metricsRecorder,
+		ErrChan:    poolErrChan,
+	})
+	if err != nil {
+		logger.Fatalf("Failed to create producer pool: %v", err)
+	}
 
 	// Create channels for WebSocket communication
 	msgChan := make(chan []byte, 100)

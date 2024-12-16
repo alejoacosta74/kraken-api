@@ -30,11 +30,13 @@ type MetricsRecorder struct {
 		connectionErrors prometheus.Counter
 		messageLatency   prometheus.Histogram
 	}
-	// kafkaMetrics struct {
-	// 	messagesSent   *prometheus.CounterVec
-	// 	sendErrors     prometheus.Counter
-	// 	messageLatency prometheus.Histogram
-	// }
+	kafkaMetrics struct {
+		messagesSent      *prometheus.CounterVec
+		sendErrors        *prometheus.CounterVec
+		poolLatency       prometheus.Histogram
+		workerUtilization prometheus.GaugeVec
+		queueSize         prometheus.Gauge
+	}
 
 	eventBus events.Bus
 	logger   *logger.Logger
@@ -105,6 +107,50 @@ func NewMetricsRecorder(ctx context.Context, eventBus events.Bus) *MetricsRecord
 		Name:      "price_spread",
 		Help:      "Current spread between best bid and ask prices",
 	})
+
+	r.kafkaMetrics.messagesSent = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "kafka",
+			Name:      "messages_sent_total",
+			Help:      "Total number of messages sent to Kafka by topic",
+		},
+		[]string{"topic"},
+	)
+
+	r.kafkaMetrics.sendErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "kafka",
+			Name:      "send_errors_total",
+			Help:      "Total number of Kafka send errors by type",
+		},
+		[]string{"error_type"},
+	)
+
+	r.kafkaMetrics.poolLatency = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "kafka",
+			Name:      "send_latency_seconds",
+			Help:      "Latency of Kafka message sending operations",
+			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+		},
+	)
+
+	r.kafkaMetrics.workerUtilization = *promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "kafka",
+			Name:      "worker_utilization",
+			Help:      "Current utilization of Kafka producer workers",
+		},
+		[]string{"worker_id"},
+	)
+
+	r.kafkaMetrics.queueSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "kafka",
+			Name:      "message_queue_size",
+			Help:      "Current size of the Kafka producer message queue",
+		},
+	)
 
 	r.logger.Debug("Metrics recorder initialized")
 	return r
@@ -269,4 +315,25 @@ func (r *MetricsRecorder) calculatePriceSpread(msg []byte) (float64, error) {
 
 func (r *MetricsRecorder) Done() <-chan struct{} {
 	return r.done
+}
+
+// RecordKafkaMessageSent records a successfully sent message
+func (r *MetricsRecorder) RecordKafkaMessageSent(topic string, duration time.Duration) {
+	r.kafkaMetrics.messagesSent.WithLabelValues(topic).Inc()
+	r.kafkaMetrics.poolLatency.Observe(duration.Seconds())
+}
+
+// RecordKafkaError records a Kafka-related error
+func (r *MetricsRecorder) RecordKafkaError(errorType string) {
+	r.kafkaMetrics.sendErrors.WithLabelValues(errorType).Inc()
+}
+
+// UpdateWorkerUtilization updates the utilization metric for a specific worker
+func (r *MetricsRecorder) UpdateWorkerUtilization(workerID string, busy float64) {
+	r.kafkaMetrics.workerUtilization.WithLabelValues(workerID).Set(busy)
+}
+
+// UpdateKafkaQueueSize updates the current message queue size
+func (r *MetricsRecorder) UpdateKafkaQueueSize(size float64) {
+	r.kafkaMetrics.queueSize.Set(size)
 }
