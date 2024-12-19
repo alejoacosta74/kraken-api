@@ -10,6 +10,7 @@ import (
 	"github.com/alejoacosta74/go-logger"
 	"github.com/alejoacosta74/kraken-api/internal/common"
 	"github.com/alejoacosta74/kraken-api/internal/events"
+	"github.com/alejoacosta74/kraken-api/pkg/kraken"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	dto "github.com/prometheus/client_model/go"
@@ -24,6 +25,7 @@ type MetricsRecorder struct {
 		processLatency    prometheus.Histogram
 		snapshotSize      prometheus.Histogram
 		priceSpread       prometheus.Gauge
+		medianPrice       prometheus.Gauge // median price of the order book for the trade pair
 	}
 	wsMetrics struct {
 		messageReceived  *prometheus.CounterVec
@@ -152,6 +154,12 @@ func NewMetricsRecorder(ctx context.Context, eventBus events.Bus) *MetricsRecord
 		},
 	)
 
+	r.orderBookMetrics.medianPrice = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "orderbook",
+		Name:      "median_price",
+		Help:      "Median price of the order book for the trade pair",
+	})
+
 	r.logger.Debug("Metrics recorder initialized")
 	return r
 }
@@ -203,6 +211,10 @@ func (r *MetricsRecorder) recordMetrics(ctx context.Context) {
 
 	updates := r.eventBus.Subscribe(common.TypeBookUpdate)
 
+	statsChan := make(chan []byte)
+	go r.runUpdateStats(statsChan)
+	defer close(statsChan)
+
 	r.logger.Debug("Subscribed to channels")
 
 	// including for debugging metrics
@@ -243,6 +255,7 @@ func (r *MetricsRecorder) recordMetrics(ctx context.Context) {
 			}).Debug("Received update event")
 			if msg, ok := event.([]byte); ok {
 				r.logger.Trace("Received update event")
+				statsChan <- msg
 				r.recordUpdate(msg)
 			}
 		}
@@ -266,6 +279,15 @@ func (r *MetricsRecorder) recordSnapshot(msg []byte) {
 	if spread, err := r.calculatePriceSpread(msg); err == nil {
 		r.orderBookMetrics.priceSpread.Set(spread)
 	}
+
+	// Calculate and record median price
+	if medianPrice, err := r.calculateMedianPrice(msg); err == nil {
+		r.orderBookMetrics.medianPrice.Set(medianPrice)
+		r.logger.WithField("median_price", medianPrice).Debug("Updated median price from snapshot")
+	} else {
+		r.logger.Errorf("Failed to calculate median price from snapshot: %v", err)
+	}
+
 }
 
 // recordUpdate records metrics for an update message
@@ -282,6 +304,19 @@ func (r *MetricsRecorder) recordUpdate(msg []byte) {
 	latency := time.Since(start).Seconds()
 	r.orderBookMetrics.processLatency.Observe(latency)
 	r.logger.WithField("latency", latency).Debug("Recorded update latency")
+
+	// Calculate and record price spread if possible
+	if spread, err := r.calculatePriceSpread(msg); err == nil {
+		r.orderBookMetrics.priceSpread.Set(spread)
+	}
+
+	// Calculate and record median price if possible
+	if medianPrice, err := r.getPriceLevel(msg); err == nil {
+		r.orderBookMetrics.medianPrice.Set(medianPrice)
+		r.logger.WithField("median_price", medianPrice).Debug("Updated median price from update")
+	} else {
+		r.logger.Errorf("Failed to calculate median price from update: %v", err)
+	}
 
 }
 
@@ -336,4 +371,54 @@ func (r *MetricsRecorder) UpdateWorkerUtilization(workerID string, busy float64)
 // UpdateKafkaQueueSize updates the current message queue size
 func (r *MetricsRecorder) UpdateKafkaQueueSize(size float64) {
 	r.kafkaMetrics.queueSize.Set(size)
+}
+
+// calculateMedianPrice parses a message and calculates the median price
+func (r *MetricsRecorder) calculateMedianPrice(msg []byte) (float64, error) {
+	var data struct {
+		Bids [][2]string `json:"bs"`
+		Asks [][2]string `json:"as"`
+	}
+
+	if err := json.Unmarshal(msg, &data); err != nil {
+		return 0, fmt.Errorf("failed to parse price data: %w", err)
+	}
+
+	if len(data.Bids) == 0 || len(data.Asks) == 0 {
+		return 0, fmt.Errorf("no price data available")
+	}
+
+	// Parse min bid
+	minBid, err := strconv.ParseFloat(data.Bids[len(data.Bids)-1][0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse min bid price: %w", err)
+	}
+
+	// Parse max ask
+	maxAsk, err := strconv.ParseFloat(data.Asks[0][0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse max ask price: %w", err)
+	}
+
+	// Calculate median price using the formula: (Min(bid)-Max(ask))/2 + Max(ask)
+	medianPrice := (minBid-maxAsk)/2 + maxAsk
+
+	return medianPrice, nil
+}
+
+// getPriceLevel returns the price level from a message, either bid or ask
+func (r *MetricsRecorder) getPriceLevel(msg []byte) (float64, error) {
+	var bookUpdate kraken.SnapshotUpdate
+
+	if err := json.Unmarshal(msg, &bookUpdate); err != nil {
+		return 0, fmt.Errorf("failed to parse price data: %w", err)
+	}
+
+	if len(bookUpdate.Data[0].Bids) > 0 {
+		return bookUpdate.Data[0].Bids[0].Price, nil
+	} else if len(bookUpdate.Data[0].Asks) > 0 {
+		return bookUpdate.Data[0].Asks[0].Price, nil
+	}
+
+	return 0, fmt.Errorf("no price data available")
 }

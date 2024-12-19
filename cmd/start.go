@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -15,11 +16,14 @@ import (
 	"github.com/alejoacosta74/kraken-api/internal/common"
 	disp "github.com/alejoacosta74/kraken-api/internal/dispatcher"
 	"github.com/alejoacosta74/kraken-api/internal/dispatcher/handlers"
+	"github.com/alejoacosta74/kraken-api/internal/stats"
 
 	"github.com/alejoacosta74/kraken-api/internal/events"
 	"github.com/alejoacosta74/kraken-api/internal/kafka"
 	"github.com/alejoacosta74/kraken-api/internal/metrics"
+	"github.com/alejoacosta74/kraken-api/internal/system"
 	"github.com/alejoacosta74/kraken-api/internal/ws"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -47,12 +51,21 @@ func init() {
 	startCmd.Flags().StringSlice("kafka-cluster-addresses", []string{"192.168.4.248:9092"}, "Kafka cluster addresses")
 	// Add kafka producer pool size flag
 	startCmd.Flags().Int("kafka-producer-pool-size", 5, "Kafka producer pool size")
+	// System settings flags
+	startCmd.Flags().Int("maxprocs", runtime.NumCPU(), "Maximum number of CPUs to use")
+	startCmd.Flags().Int("gcpercent", 100, "GC target percentage")
+	startCmd.Flags().Int("maxthreads", 10000, "Maximum number of OS threads")
+	startCmd.Flags().Int("memorylimit", 2048, "Memory limit in MB")
 	// Bind all flags to viper
 	viper.BindPFlag("tradingpair", startCmd.Flags().Lookup("pair"))
 	viper.BindPFlag("metrics.addr", startCmd.Flags().Lookup("metrics-addr"))
 	viper.BindPFlag("metrics.buffer", startCmd.Flags().Lookup("metrics-buffer"))
 	viper.BindPFlag("kafka.cluster.addresses", startCmd.Flags().Lookup("kafka-cluster-addresses"))
 	viper.BindPFlag("kafka.producer.pool.size", startCmd.Flags().Lookup("kafka-producer-pool-size"))
+	viper.BindPFlag("system.maxprocs", startCmd.Flags().Lookup("maxprocs"))
+	viper.BindPFlag("system.gcpercent", startCmd.Flags().Lookup("gcpercent"))
+	viper.BindPFlag("system.maxthreads", startCmd.Flags().Lookup("maxthreads"))
+	viper.BindPFlag("system.memorylimit", startCmd.Flags().Lookup("memorylimit"))
 }
 
 // runStart is the main entry point for the WebSocket client application.
@@ -69,6 +82,17 @@ func init() {
 func runStart(cmd *cobra.Command, args []string) {
 	wsUrl := args[0]
 	pair := viper.GetString("tradingpair")
+
+	// Apply system settings
+	settings := system.DefaultSettings().
+		WithMaxProcs(runtime.NumCPU()).
+		WithGCPercent(100).
+		WithMaxThreads(10000).
+		WithMemoryLimit(2048) // 2GB
+
+	if err := settings.Apply(); err != nil {
+		logger.Fatalf("Failed to apply system settings: %v", err)
+	}
 
 	// Get Kafka brokers from viper
 	kafkaBrokers := viper.GetStringSlice("kafka.cluster.addresses")
@@ -205,6 +229,22 @@ func runStart(cmd *cobra.Command, args []string) {
 		}
 		<-wsDoneChan
 		shutdownStatuses <- componentStatus{"websocket_client", nil}
+	}()
+
+	// Start stats
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		stats := stats.NewSystemStats()
+		if err := stats.Start(ctx); err != nil {
+			shutdownStatuses <- componentStatus{"stats", err}
+			logger.Error("Stats error:", err)
+		} else {
+			shutdownStatuses <- componentStatus{"stats", nil}
+			logger.Info("Stats started")
+			<-stats.Done()
+			logger.Info("Stats shutdown")
+		}
 	}()
 
 	// go routine to log all the errors received from the error channels
