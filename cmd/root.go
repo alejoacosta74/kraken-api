@@ -58,6 +58,12 @@ func init() {
 	// flag to read the log level from the command line
 	rootCmd.PersistentFlags().StringP("log-level", "l", "info", "Log level (debug, info, warn, error)")
 	viper.BindPFlag("log-level", rootCmd.PersistentFlags().Lookup("log-level"))
+
+	// add flags for profiling
+	rootCmd.PersistentFlags().String("cpuprofile", "", "write cpu profile to `file`")
+	rootCmd.PersistentFlags().String("memprofile", "", "write memory profile to `file`")
+	viper.BindPFlag("cpuprofile", rootCmd.PersistentFlags().Lookup("cpuprofile"))
+	viper.BindPFlag("memprofile", rootCmd.PersistentFlags().Lookup("memprofile"))
 }
 
 func persistentPreRun(cmd *cobra.Command, args []string) {

@@ -83,6 +83,9 @@ func runStart(cmd *cobra.Command, args []string) {
 	wsUrl := args[0]
 	pair := viper.GetString("tradingpair")
 
+	startProfiling(viper.GetString("cpuprofile"), viper.GetString("memprofile"))
+	defer stopProfiling(viper.GetString("memprofile"))
+
 	// Apply system settings
 	settings := system.DefaultSettings().
 		WithMaxProcs(runtime.NumCPU()).
