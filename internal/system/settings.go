@@ -65,8 +65,6 @@ func (s *Settings) setMemoryLimit() error {
 	memoryLimitBytes := int64(s.MemoryLimit) * 1024 * 1024
 
 	// Set soft memory limit using GOGC
-	// This is a simplified approach - in production you might want
-	// to use more sophisticated memory management
 	debug.SetMemoryLimit(memoryLimitBytes)
 
 	return nil

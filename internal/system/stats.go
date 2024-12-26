@@ -1,4 +1,4 @@
-package stats
+package system
 
 import (
 	"context"
@@ -95,6 +95,7 @@ func (s *SystemStats) Done() <-chan struct{} {
 	return s.done
 }
 
+// bToMb converts bytes to megabytes
 func bToMb(b uint64) uint64 {
 	return b / 1024 / 1024
 }

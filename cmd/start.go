@@ -16,7 +16,6 @@ import (
 	"github.com/alejoacosta74/kraken-api/internal/common"
 	disp "github.com/alejoacosta74/kraken-api/internal/dispatcher"
 	"github.com/alejoacosta74/kraken-api/internal/dispatcher/handlers"
-	"github.com/alejoacosta74/kraken-api/internal/stats"
 
 	"github.com/alejoacosta74/kraken-api/internal/events"
 	"github.com/alejoacosta74/kraken-api/internal/kafka"
@@ -83,21 +82,17 @@ func runStart(cmd *cobra.Command, args []string) {
 	wsUrl := args[0]
 	pair := viper.GetString("tradingpair")
 
-	startProfiling(viper.GetString("cpuprofile"), viper.GetString("memprofile"))
-	defer stopProfiling(viper.GetString("memprofile"))
+	// set system runtime settings and start profiling
+	system.StartProfiling(viper.GetString("cpuprofile"), viper.GetString("memprofile"))
+	defer system.StopProfiling(viper.GetString("memprofile"))
 
-	// Apply system settings
-	settings := system.DefaultSettings().
-		WithMaxProcs(runtime.NumCPU()).
-		WithGCPercent(100).
-		WithMaxThreads(10000).
-		WithMemoryLimit(2048) // 2GB
+	settings := system.LoadFromViper()
 
 	if err := settings.Apply(); err != nil {
 		logger.Fatalf("Failed to apply system settings: %v", err)
 	}
 
-	// Get Kafka brokers from viper
+	// get kafka brokers from viper
 	kafkaBrokers := viper.GetStringSlice("kafka.cluster.addresses")
 
 	// Check Kafka availability with a reasonable timeout
@@ -238,7 +233,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		stats := stats.NewSystemStats()
+		stats := system.NewSystemStats()
 		if err := stats.Start(ctx); err != nil {
 			shutdownStatuses <- componentStatus{"stats", err}
 			logger.Error("Stats error:", err)
