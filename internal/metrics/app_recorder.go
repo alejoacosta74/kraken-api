@@ -13,7 +13,6 @@ import (
 	"github.com/alejoacosta74/kraken-api/pkg/kraken"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	dto "github.com/prometheus/client_model/go"
 )
 
 // MetricsRecorder handles the collection and recording of metrics
@@ -169,37 +168,6 @@ func NewMetricsRecorder(ctx context.Context, eventBus events.Bus) *MetricsRecord
 func (r *MetricsRecorder) Start(ctx context.Context) error {
 	r.logger.Debug("Starting metrics recorder")
 
-	// Add test metric
-	testGauge := promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "test_metric",
-		Help: "Test metric to verify prometheus integration",
-	})
-	testGauge.Set(42.0)
-
-	// Add periodic metric value verification
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// Get current metric values
-				snapshot := &dto.Metric{}
-				r.orderBookMetrics.snapshotsReceived.Write(snapshot)
-				r.logger.WithField("value", snapshot.Counter.GetValue()).
-					Info("Current snapshot count")
-
-				updates := &dto.Metric{}
-				r.orderBookMetrics.updatesReceived.Write(updates)
-				r.logger.WithField("value", updates.Counter.GetValue()).
-					Info("Current update count")
-			}
-		}
-	}()
-
 	// Subscribe to events and start recording
 	go r.recordMetrics(ctx)
 	return nil
@@ -211,16 +179,15 @@ func (r *MetricsRecorder) recordMetrics(ctx context.Context) {
 
 	updates := r.eventBus.Subscribe(common.TypeBookUpdate)
 
-	statsChan := make(chan []byte)
-	go r.runUpdateStats(statsChan)
-	defer close(statsChan)
-
-	r.logger.Debug("Subscribed to channels")
+	r.logger.Debug("Subscribed to event bus channels")
 
 	// including for debugging metrics
 	snapshotCount := 0
 	updateCount := 0
 
+	// ticker to log stats every 10 seconds
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -254,9 +221,12 @@ func (r *MetricsRecorder) recordMetrics(ctx context.Context) {
 				"payload_size":  len(event.([]byte)),
 			}).Debug("Received update event")
 			if msg, ok := event.([]byte); ok {
-				r.logger.Trace("Received update event")
-				statsChan <- msg
 				r.recordUpdate(msg)
+				select {
+				case <-ticker.C:
+					r.logger.WithField("book_update", string(msg)).Info("Received update")
+				default:
+				}
 			}
 		}
 	}

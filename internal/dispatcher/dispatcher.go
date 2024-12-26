@@ -211,7 +211,6 @@ func (d *Dispatcher) dispatch(msg []byte) error {
 		d.logger.Errorf("No handler registered for message type: %s. Message: %s", msgType, string(msg))
 		return fmt.Errorf("no handler registered for message type: %s", msgType)
 	}
-	d.logger.Tracef("Handler found for message type: %s", msgType)
 	if err := handler.Handle(msg); err != nil {
 		return fmt.Errorf("handler error: %w", err)
 	}

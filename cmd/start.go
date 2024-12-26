@@ -116,6 +116,7 @@ func runStart(cmd *cobra.Command, args []string) {
 	eventBus := events.NewEventBus()
 	metricsServer := metrics.NewMetricsServer(viper.GetString("metrics.addr"))
 	metricsRecorder := metrics.NewMetricsRecorder(ctx, eventBus)
+	systemCollector := metrics.NewSystemCollector()
 
 	// create producer pool
 	poolErrChan := make(chan error, 10)
@@ -207,6 +208,18 @@ func runStart(cmd *cobra.Command, args []string) {
 		shutdownStatuses <- componentStatus{"metrics_recorder", nil}
 	}()
 
+	// Start system collector
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := systemCollector.Start(ctx); err != nil {
+			shutdownStatuses <- componentStatus{"system_collector", err}
+			logger.Error("System collector error:", err)
+		}
+		<-systemCollector.Done()
+		shutdownStatuses <- componentStatus{"system_collector", nil}
+	}()
+
 	// Start dispatcher
 	wg.Add(1)
 	go func() {
@@ -229,21 +242,21 @@ func runStart(cmd *cobra.Command, args []string) {
 		shutdownStatuses <- componentStatus{"websocket_client", nil}
 	}()
 
-	// Start stats
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		stats := system.NewSystemStats()
-		if err := stats.Start(ctx); err != nil {
-			shutdownStatuses <- componentStatus{"stats", err}
-			logger.Error("Stats error:", err)
-		} else {
-			shutdownStatuses <- componentStatus{"stats", nil}
-			logger.Info("Stats started")
-			<-stats.Done()
-			logger.Info("Stats shutdown")
-		}
-	}()
+	// Start system stats
+	// wg.Add(1)
+	// go func() {
+	// 	defer wg.Done()
+	// 	stats := system.NewSystemStats()
+	// 	if err := stats.Start(ctx); err != nil {
+	// 		shutdownStatuses <- componentStatus{"stats", err}
+	// 		logger.Error("Stats error:", err)
+	// 	} else {
+	// 		shutdownStatuses <- componentStatus{"stats", nil}
+	// 		logger.Info("Stats started")
+	// 		<-stats.Done()
+	// 		logger.Info("Stats shutdown")
+	// 	}
+	// }()
 
 	// go routine to log all the errors received from the error channels
 	go func() {

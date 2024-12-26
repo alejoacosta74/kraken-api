@@ -101,6 +101,9 @@ The application can be configured through command-line flags or environment vari
 
 - Prometheus metrics available at `http://localhost:2112/metrics`
 - Grafana dashboards accessible at `http://localhost:3000`
+- Sample Grafana dashboard:
+
+<img src="grafana.png" height="400" />
 
 ## 🔄 Message Flow
 

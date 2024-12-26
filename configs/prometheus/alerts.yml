@@ -30,3 +30,35 @@ groups:
         annotations:
           summary: "WebSocket connection errors detected"
           description: "WebSocket client is experiencing connection issues" 
+
+  - name: system_alerts
+    rules:
+      # Alert on high memory usage
+      - alert: HighMemoryUsage
+        expr: system_memory_bytes{type="heap_inuse"} / system_memory_bytes{type="heap_sys"} > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage detected"
+          description: "Heap memory usage is above 85%"
+
+      # Alert on high goroutine count
+      - alert: HighGoroutineCount
+        expr: system_goroutines > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of goroutines"
+          description: "System has over 1000 goroutines running"
+
+      # Alert on frequent GC runs
+      - alert: FrequentGarbageCollection
+        expr: rate(system_gc_stats{type="num_gc"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent garbage collection"
+          description: "System is performing more than 10 GC cycles per minute"

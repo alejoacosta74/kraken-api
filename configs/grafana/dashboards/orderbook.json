@@ -24,6 +24,44 @@
           "legendFormat": "Avg Latency"
         }
       ]
-    }
+    },
+    {
+		"title": "System Memory Usage",
+		"type": "graph",
+		"targets": [
+		  {
+			"expr": "system_memory_bytes{type='heap_inuse'} / 1024 / 1024",
+			"legendFormat": "Heap In Use (MB)"
+		  },
+		  {
+			"expr": "system_memory_bytes{type='heap_idle'} / 1024 / 1024",
+			"legendFormat": "Heap Idle (MB)"
+		  }
+		]
+	  },
+	  {
+		"title": "Goroutines",
+		"type": "graph",
+		"targets": [
+		  {
+			"expr": "system_goroutines",
+			"legendFormat": "Active Goroutines"
+		  }
+		]
+	  },
+	  {
+		"title": "GC Statistics",
+		"type": "graph",
+		"targets": [
+		  {
+			"expr": "rate(system_gc_stats{type='pause_total_ns'}[5m])",
+			"legendFormat": "GC Pause Time"
+		  },
+		  {
+			"expr": "rate(system_gc_stats{type='num_gc'}[5m])",
+			"legendFormat": "GC Cycles/sec"
+		  }
+		]
+	  }
   ]
 } 
