@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/IBM/sarama"
+	"github.com/alejoacosta74/go-logger"
 )
 
 // saramaProducer implements the KafkaProducer interface using Sarama's SyncProducer.
@@ -17,6 +18,8 @@ import (
 // The struct wraps a sarama.SyncProducer which handles the actual Kafka communication
 // and provides configuration options like retry policies and required acknowledgments.
 type saramaProducer struct {
+	id       int // producer id
+	logger   *logger.Logger
 	producer sarama.SyncProducer
 }
 
@@ -42,7 +45,7 @@ type saramaProducer struct {
 // Usage:
 // Typically instantiated by the producer pool to create the desired number of producers.
 // Each producer maintains its own connection to the Kafka cluster.
-func newSaramaProducer(config ProducerConfig) (KafkaProducer, error) {
+func newSaramaProducer(config ProducerConfig, id int) (KafkaProducer, error) {
 	// Configure Sarama
 	saramaConfig := sarama.NewConfig()
 	saramaConfig.Producer.Return.Successes = true
@@ -56,7 +59,11 @@ func newSaramaProducer(config ProducerConfig) (KafkaProducer, error) {
 		return nil, fmt.Errorf("failed to create Sarama producer: %w", err)
 	}
 
-	return &saramaProducer{producer: producer}, nil
+	return &saramaProducer{
+		id:       id,
+		logger:   logger.WithField("component", "sarama_producer"),
+		producer: producer,
+	}, nil
 }
 
 // Send sends a message to the Kafka topic using the Sarama producer.
@@ -83,6 +90,7 @@ func (p *saramaProducer) Send(ctx context.Context, msg Message) error {
 	done := make(chan error, 1)
 	go func() {
 		_, _, err := p.producer.SendMessage(saramaMsg)
+		p.logger.WithField("sarama_producer_id", p.id).Tracef("Message sent to kafka with error: %v", err)
 		done <- err
 	}()
 

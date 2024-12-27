@@ -76,7 +76,7 @@ func (p *producerPool) Start() error {
 
 	// Initialize the producer pool
 	for i := 0; i < p.config.PoolSize; i++ {
-		producer, err := newSaramaProducer(p.config)
+		producer, err := newSaramaProducer(p.config, i)
 		if err != nil {
 			// Clean up any producers already created
 			p.Stop()
@@ -196,7 +196,7 @@ func (p *producerPool) Send(ctx context.Context, topic string, rawMsg []byte) er
 			}()
 
 			// Use a separate context for the send operation
-			sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			sendCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
 
 			if err := producer.Send(sendCtx, msg); err != nil {

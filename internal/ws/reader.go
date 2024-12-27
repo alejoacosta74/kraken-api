@@ -65,6 +65,10 @@ func (r *Reader) Run() {
 	// Start the read loop in a separate goroutine
 	go func() {
 		defer close(readDone)
+		//! only for debugging
+		// ticker := time.NewTicker(5 * time.Second)
+		// defer ticker.Stop()
+		//! end of debugging
 		for {
 			r.mutex.Lock()
 			_, message, err := r.conn.ReadMessage()
@@ -92,6 +96,11 @@ func (r *Reader) Run() {
 			case r.msgChan <- message:
 				r.logger.Debug("Message sent to msgChan")
 			}
+			//! only for debugging
+			// case <-ticker.C:
+			// 	r.msgChan <- message
+			// }
+			//! end of debugging
 		}
 	}()
 
