@@ -82,6 +82,8 @@ func runStart(cmd *cobra.Command, args []string) {
 	wsUrl := args[0]
 	pair := viper.GetString("tradingpair")
 
+	logger := logger.WithField("component", "start")
+
 	// set system runtime settings and start profiling
 	system.StartProfiling(viper.GetString("cpuprofile"), viper.GetString("memprofile"))
 	defer system.StopProfiling(viper.GetString("memprofile"))

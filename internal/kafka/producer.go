@@ -46,6 +46,7 @@ func newSaramaProducer(config ProducerConfig) (KafkaProducer, error) {
 	// Configure Sarama
 	saramaConfig := sarama.NewConfig()
 	saramaConfig.Producer.Return.Successes = true
+	saramaConfig.Producer.Return.Errors = true
 	saramaConfig.Producer.RequiredAcks = sarama.WaitForAll
 	saramaConfig.Producer.Retry.Max = 3
 

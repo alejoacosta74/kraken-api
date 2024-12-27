@@ -16,6 +16,7 @@ type PoolController interface {
 type ProducerPool interface {
 	MessageSender
 	PoolController
+	IsHealthy() bool
 }
 
 // KafkaProducer defines the interface for a single producer

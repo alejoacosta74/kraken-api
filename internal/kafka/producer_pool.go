@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alejoacosta74/go-logger"
+	"github.com/alejoacosta74/kraken-api/internal/circuitbreaker"
 	"github.com/alejoacosta74/kraken-api/internal/metrics"
 )
 
@@ -39,6 +40,7 @@ type producerPool struct {
 	mu        sync.RWMutex       // Protects started flag
 	metrics   *metrics.MetricsRecorder
 	errChan   chan error // channel to send errors
+	breaker   *circuitbreaker.CircuitBreaker
 }
 
 // NewProducerPool creates a new pool of Kafka producers
@@ -57,6 +59,7 @@ func NewProducerPool(config ProducerConfig) (*producerPool, error) {
 		cancel:    cancel,
 		metrics:   config.Metrics,
 		errChan:   make(chan error, 10),
+		breaker:   circuitbreaker.NewCircuitBreaker(config.PoolSize, 10*time.Second),
 	}
 
 	return pool, nil
@@ -170,6 +173,7 @@ func (p *producerPool) Stop() error {
 // - 3 second timeout waiting for available producer
 // - 5 second timeout for the actual send operation
 func (p *producerPool) Send(ctx context.Context, topic string, rawMsg []byte) error {
+
 	start := time.Now()
 
 	// update kafka queue size
@@ -183,40 +187,40 @@ func (p *producerPool) Send(ctx context.Context, topic string, rawMsg []byte) er
 	p.wg.Add(1)
 	defer p.wg.Done()
 
-	select {
-	case producer := <-p.producers:
-		defer func() {
-			select {
-			case <-p.ctx.Done():
-				// Pool is shutting down
-				producer.Close()
-			default:
+	// Wrap the send operation in a circuit breaker
+	err := p.breaker.Execute(func() error {
+		select {
+		case producer := <-p.producers:
+			defer func() {
 				p.producers <- producer
+			}()
+
+			// Use a separate context for the send operation
+			sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+
+			if err := producer.Send(sendCtx, msg); err != nil {
+				p.logger.Errorf("Failed to send message: %v", err)
+				p.errChan <- err
+				p.metrics.RecordKafkaError(err.Error())
+				return fmt.Errorf("failed to send message: %w", err)
 			}
-		}()
+			p.logger.Trace("Message sent successfully")
+			duration := time.Since(start)
+			p.metrics.RecordKafkaMessageSent(msg.Topic, duration)
+			return nil
 
-		// Use a separate context for the send operation
-		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
+		case <-ctx.Done():
+			p.metrics.RecordKafkaError("context_cancelled")
+			return fmt.Errorf("operation cancelled by caller: %w", ctx.Err())
 
-		if err := producer.Send(sendCtx, msg); err != nil {
-			p.errChan <- err
-			p.metrics.RecordKafkaError(err.Error())
-			return fmt.Errorf("failed to send message: %w", err)
+		case <-p.ctx.Done():
+			p.metrics.RecordKafkaError("producer_pool_shutdown")
+			return fmt.Errorf("producer pool is shutting down")
 		}
+	})
 
-		duration := time.Since(start)
-		p.metrics.RecordKafkaMessageSent(msg.Topic, duration)
-		return nil
-
-	case <-ctx.Done():
-		p.metrics.RecordKafkaError("context_cancelled")
-		return fmt.Errorf("operation cancelled by caller: %w", ctx.Err())
-
-	case <-p.ctx.Done():
-		p.metrics.RecordKafkaError("producer_pool_shutdown")
-		return fmt.Errorf("producer pool is shutting down")
-	}
+	return err
 }
 
 // Close gracefully shuts down all producers in the pool by:
@@ -244,4 +248,14 @@ func (p *producerPool) Close() error {
 	}
 	close(p.producers)
 	return closeErr
+}
+
+func (p *producerPool) IsHealthy() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if !p.started {
+		return false
+	}
+
+	return p.breaker.AllowRequest()
 }

@@ -21,19 +21,23 @@ func NewBookUpdateHandler(base *BaseHandler) *BookUpdateHandler {
 }
 
 func (h *BookUpdateHandler) Handle(msg []byte) error {
+	if !h.producerPool.IsHealthy() {
+		return fmt.Errorf("producer pool is unhealthy")
+	}
+
 	var update kraken.SnapshotUpdate
 	if err := json.Unmarshal(msg, &update); err != nil {
 		return fmt.Errorf("failed to parse book update: %w", err)
 	}
 
 	// Log the update
-	h.logger.Tracef("Received book update for: %s", update.Data[0].Symbol)
+	h.logger.Infof("Received book update for: %s", update.Data[0].Symbol)
 
 	// Send to producer pool
 	if err := h.producerPool.Send(h.ctx, h.topicName, msg); err != nil {
 		return fmt.Errorf("failed to send to kafka: %w", err)
 	}
-	h.logger.Trace("Book update sent to Kafka")
+	h.logger.Info("Book update sent to Kafka")
 
 	return nil
 }

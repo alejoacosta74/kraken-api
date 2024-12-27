@@ -49,6 +49,8 @@ type Dispatcher struct {
 
 	producerPool kafka.ProducerPool
 
+	workerPool chan struct{} // Channel/semaphore to limit the number of concurrent workers
+
 	ctx context.Context
 }
 
@@ -79,6 +81,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		errChan:      cfg.ErrChan,
 		doneChan:     cfg.DoneChan,
 		producerPool: cfg.ProducerPool,
+		workerPool:   make(chan struct{}, 5), // Limit to 5 concurrent workers
 		ctx:          cfg.Ctx,
 	}
 
@@ -153,13 +156,23 @@ func (d *Dispatcher) Run() {
 			return
 
 		case msg := <-d.msgChan:
-			wg.Add(1)
-			go func(message []byte) {
-				defer wg.Done()
-				if err := d.dispatch(message); err != nil {
-					d.errChan <- fmt.Errorf("dispatch error: %w", err)
-				}
-			}(msg)
+			select {
+			case d.workerPool <- struct{}{}: // Acquire a worker slot
+				wg.Add(1)
+				go func(message []byte) {
+					defer func() {
+						<-d.workerPool // Release the worker slot
+						d.logger.Trace("Worker slot released")
+						wg.Done()
+					}()
+					if err := d.dispatch(message); err != nil {
+						d.errChan <- fmt.Errorf("dispatch error: %w", err)
+					}
+
+				}(msg)
+			default:
+				d.logger.Warn("Worker pool is full, dropping message")
+			}
 		}
 	}
 }
@@ -199,7 +212,7 @@ func (d *Dispatcher) dispatch(msg []byte) error {
 	d.logger.WithFields(logger.Fields{
 		"msg_type": msgType,
 		"msg_size": len(msg),
-	}).Debug("About to handle message")
+	}).Trace("About to handle message")
 
 	d.logger.Tracef("Message type: %s", msgType)
 	// Get handler for message type (thread-safe)
@@ -211,8 +224,21 @@ func (d *Dispatcher) dispatch(msg []byte) error {
 		d.logger.Errorf("No handler registered for message type: %s. Message: %s", msgType, string(msg))
 		return fmt.Errorf("no handler registered for message type: %s", msgType)
 	}
-	if err := handler.Handle(msg); err != nil {
-		return fmt.Errorf("handler error: %w", err)
+
+	errChan := make(chan error)
+	dispatchCtx, cancel := context.WithTimeout(d.ctx, 3*time.Second)
+	defer cancel()
+	go func() {
+		errChan <- handler.Handle(msg)
+	}()
+
+	select {
+	case err := <-errChan:
+		if err != nil {
+			return fmt.Errorf("handler error: %w", err)
+		}
+	case <-dispatchCtx.Done():
+		return fmt.Errorf("dispatch timeout")
 	}
 
 	d.eventBus.Publish(common.MessageType(msgType), msg)
