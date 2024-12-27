@@ -2,15 +2,12 @@ module github.com/alejoacosta74/kraken-api
 
 go 1.21.1
 
-replace github.com/alejoacosta74/go-logger => ../mylogger2
-
 require (
 	github.com/IBM/sarama v1.43.3
-	github.com/alejoacosta74/go-logger v0.0.0-00010101000000-000000000000
+	github.com/alejoacosta74/go-logger v0.2.3
 	github.com/golang/mock v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.20.5
-	github.com/prometheus/client_model v0.6.1
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.9.0
@@ -47,6 +44,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475 // indirect
